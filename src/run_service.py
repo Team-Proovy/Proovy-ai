@@ -8,16 +8,16 @@ from core.settings import settings
 
 
 def main() -> None:
-	# settings.MODE == "dev" 인 경우 자동 reload 켜기
-	import uvicorn
+    # settings.MODE == "dev" 인 경우 자동 reload 켜기
+    import uvicorn
 
-	uvicorn.run(
-		"service.service:app",  # 모듈: service/service.py, 객체: app
-		host=settings.HOST,
-		port=settings.PORT,
-		reload=settings.is_dev(),
-	)
+    uvicorn.run(
+        "service.service:app",  # 모듈: service/service.py, 객체: app
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=settings.is_dev(),
+    )
 
 
 if __name__ == "__main__":
-	main()
+    main()

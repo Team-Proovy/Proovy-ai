@@ -7,8 +7,6 @@ FastAPI 서비스 엔트리포인트.
   SSE(text/event-stream) 형식으로 변환해 클라이언트에 반환한다.
 """
 
-
-
 import inspect
 import json
 import logging
@@ -23,7 +21,13 @@ from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from langchain_core._api import LangChainBetaWarning
-from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    AnyMessage,
+    HumanMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langfuse import Langfuse  # type: ignore[import-untyped]
 from langfuse.langchain import (
@@ -63,7 +67,11 @@ def custom_generate_unique_id(route: APIRoute) -> str:
 def verify_bearer(
     http_auth: Annotated[
         HTTPAuthorizationCredentials | None,
-        Depends(HTTPBearer(description="Please provide AUTH_SECRET api key.", auto_error=False)),
+        Depends(
+            HTTPBearer(
+                description="Please provide AUTH_SECRET api key.", auto_error=False
+            )
+        ),
     ],
 ) -> None:
     if not settings.AUTH_SECRET:
@@ -90,7 +98,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await store.setup()
 
             # Configure agents with both memory components and async loading
-            agents = get_all_agent_info()
+            get_all_agent_info()
 
             # load_agents 필요하면 하기
 
@@ -117,7 +125,9 @@ async def info() -> ServiceMetadata:
     )
 
 
-async def _handle_input(user_input: UserInput, agent: AgentGraph) -> tuple[dict[str, Any], UUID]:
+async def _handle_input(
+    user_input: UserInput, agent: AgentGraph
+) -> tuple[dict[str, Any], UUID]:
     """
     Parse user input and handle any required interrupt resumption.
     Returns kwargs for agent invocation and the run_id.
@@ -294,7 +304,10 @@ async def message_generator(
                     yield f"data: {json.dumps({'type': 'error', 'content': 'Unexpected error'})}\n\n"
                     continue
                 # LangGraph re-sends the input message, which feels weird, so drop it
-                if chat_message.type == "human" and chat_message.content == user_input.message:
+                if (
+                    chat_message.type == "human"
+                    and chat_message.content == user_input.message
+                ):
                     continue
                 yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()})}\n\n"
 
@@ -327,6 +340,7 @@ def _create_ai_message(parts: dict) -> AIMessage:
     filtered = {k: v for k, v in parts.items() if k in valid_keys}
     return AIMessage(**filtered)
 
+
 # [중요도: 10/10] 실시간 스트리밍 - 최고 우선순위, 중간 과정/토큰 단위 응답으로 UX 극대화def _sse_response_example() -> dict[int | str, Any]:
 def _sse_response_example() -> dict[int | str, Any]:
     return {
@@ -348,8 +362,12 @@ def _sse_response_example() -> dict[int | str, Any]:
     responses=_sse_response_example(),
     operation_id="stream_with_agent_id",
 )
-@router.post("/stream", response_class=StreamingResponse, responses=_sse_response_example())
-async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> StreamingResponse:
+@router.post(
+    "/stream", response_class=StreamingResponse, responses=_sse_response_example()
+)
+async def stream(
+    user_input: StreamInput, agent_id: str = DEFAULT_AGENT
+) -> StreamingResponse:
     """
     Stream an agent's response to a user input, including intermediate messages and tokens.
 
@@ -400,7 +418,9 @@ async def history(input: ChatHistoryInput) -> ChatHistory:
             config=RunnableConfig(configurable={"thread_id": input.thread_id})
         )
         messages: list[AnyMessage] = state_snapshot.values["messages"]
-        chat_messages: list[ChatMessage] = [langchain_to_chat_message(m) for m in messages]
+        chat_messages: list[ChatMessage] = [
+            langchain_to_chat_message(m) for m in messages
+        ]
         return ChatHistory(messages=chat_messages)
     except Exception as e:
         logger.error(f"An exception occurred: {e}")
@@ -417,7 +437,9 @@ async def health_check():
     if settings.LANGFUSE_TRACING:
         try:
             langfuse = Langfuse()
-            health_status["langfuse"] = "connected" if langfuse.auth_check() else "disconnected"
+            health_status["langfuse"] = (
+                "connected" if langfuse.auth_check() else "disconnected"
+            )
         except Exception as e:
             logger.error(f"Langfuse connection error: {e}")
             health_status["langfuse"] = "disconnected"

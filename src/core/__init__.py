@@ -11,6 +11,6 @@ from .settings import settings
 from .llm import get_model
 
 __all__ = [
-	"settings",
-	"get_model",
+    "settings",
+    "get_model",
 ]
