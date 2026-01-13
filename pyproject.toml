@@ -15,6 +15,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "python-dotenv>=1.2.1",
     "langfuse>=3.11.2",
+    "langgraph-cli[inmem]>=0.4.11",
 ]
 
 [project.optional-dependencies]
