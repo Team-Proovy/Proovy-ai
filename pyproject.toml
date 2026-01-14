@@ -12,9 +12,10 @@ dependencies = [
     "langchain-openai>=0.1.23",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
-    "uvicorn>=0.30",
+    "uvicorn[standard]>=0.30",
     "python-dotenv>=1.2.1",
     "langfuse>=3.11.2",
+    "langgraph-cli[inmem]>=0.4.11",
 ]
 
 [project.optional-dependencies]
@@ -31,3 +32,9 @@ asyncio_mode = "auto"
 [build-system]
 requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "ruff>=0.14.11",
+]

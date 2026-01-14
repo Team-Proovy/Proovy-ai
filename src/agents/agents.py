@@ -13,7 +13,7 @@ DEFAULT_AGENT = ""
 # - @entrypoint 함수는 Pregel 을 반환
 # - StateGraph().compile() 은 CompiledStateGraph 를 반환
 AgentGraph = CompiledStateGraph | Pregel  # get_agent() 가 항상 반환하는 타입
-AgentGraphLike = CompiledStateGraph | Pregel   # 레지스트리에 저장될 수 있는 타입
+AgentGraphLike = CompiledStateGraph | Pregel  # 레지스트리에 저장될 수 있는 타입
 
 
 @dataclass
@@ -34,5 +34,6 @@ def get_agent(agent_id: str) -> AgentGraph:
 
 def get_all_agent_info() -> list[AgentInfo]:
     return [
-        AgentInfo(key=agent_id, description=agent.description) for agent_id, agent in agents.items()
+        AgentInfo(key=agent_id, description=agent.description)
+        for agent_id, agent in agents.items()
     ]

@@ -1,0 +1,9 @@
+{
+    "dependencies": [
+        "."
+    ],
+    "graphs": {
+        "agent": "src.agents.workflows.maingraph:graph"
+    },
+    "env": ".env"
+}

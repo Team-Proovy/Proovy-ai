@@ -1,13 +1,11 @@
-#Pydantic BaseSettings 기반으로 .env/환경변수에서 모든 설정을 읽어오는 중앙 설정 객체
+# Pydantic BaseSettings 기반으로 .env/환경변수에서 모든 설정을 읽어오는 중앙 설정 객체
 
 from enum import StrEnum
-from json import loads
 from typing import Annotated, Any
 
 from dotenv import find_dotenv
 from pydantic import (
     BeforeValidator,
-    Field,
     HttpUrl,
     SecretStr,
     TypeAdapter,
@@ -86,7 +84,9 @@ class Settings(BaseSettings):
     LANGCHAIN_API_KEY: SecretStr | None = None
 
     LANGFUSE_TRACING: bool = False
-    LANGFUSE_HOST: Annotated[str, BeforeValidator(check_str_is_http)] = "https://cloud.langfuse.com"
+    LANGFUSE_HOST: Annotated[str, BeforeValidator(check_str_is_http)] = (
+        "https://cloud.langfuse.com"
+    )
     LANGFUSE_PUBLIC_KEY: SecretStr | None = None
     LANGFUSE_SECRET_KEY: SecretStr | None = None
 
