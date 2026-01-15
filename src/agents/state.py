@@ -1,5 +1,7 @@
 # LangGraph 에이전트들이 공유해서 사용할 상태(state) 정의를 모아두는 곳입니다.
-from typing import TypedDict, Annotated, Literal, List, Dict, Any, Optional
+from typing import Annotated, Literal, List, Dict, Any, Optional
+
+from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
 import operator
