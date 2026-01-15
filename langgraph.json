@@ -6,8 +6,7 @@
         "agent": "src.agents.workflows.maingraph:graph",
         "preprocessing": "src.agents.workflows.subgraphs.step1_preprocessing.graph:graph",
         "router": "src.agents.workflows.subgraphs.step2_router.graph:graph",
-        "rag": "src.agents.workflows.subgraphs.step3_rag.graph:graph",
-        "features": "src.agents.workflows.subgraphs.step4_features:graph"
+        "rag": "src.agents.workflows.subgraphs.step3_rag.graph:graph"
     },
     "env": ".env"
 }

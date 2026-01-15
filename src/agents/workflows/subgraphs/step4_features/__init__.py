@@ -1,51 +1,21 @@
-"""Features subgraph.
+"""기능 서브그래프.
 
-Solve / Explain / Graph / Variant / Solution / Check 노드들을
-하나의 서브그래프로 묶는 뼈대 구현입니다.
+이 패키지는 개별 기능 서브그래프를 노출하여
+메인 그래프에서 가져와 사용할 수 있도록 합니다.
 """
 
-from langgraph.graph import StateGraph
+from .check.graph import graph as check_graph
+from .create_graph.graph import graph as create_graph_graph
+from .explain.graph import graph as explain_graph
+from .solution.graph import graph as solution_graph
+from .solve.graph import graph as solve_graph
+from .variant.graph import graph as variant_graph
 
-from agents.state import AgentState
-
-
-def feature_solve(state: AgentState) -> AgentState:
-    return state
-
-
-def feature_explain(state: AgentState) -> AgentState:
-    return state
-
-
-def feature_graph(state: AgentState) -> AgentState:
-    return state
-
-
-def feature_variant(state: AgentState) -> AgentState:
-    return state
-
-
-def feature_solution(state: AgentState) -> AgentState:
-    return state
-
-
-def feature_check(state: AgentState) -> AgentState:
-    return state
-
-
-builder = StateGraph(AgentState)
-builder.add_node("Solve", feature_solve)
-builder.add_node("Explain", feature_explain)
-builder.add_node("Graph", feature_graph)
-builder.add_node("Variant", feature_variant)
-builder.add_node("Solution", feature_solution)
-builder.add_node("Check", feature_check)
-
-builder.set_entry_point("Solve")
-builder.add_edge("Solve", "Explain")
-builder.add_edge("Explain", "Graph")
-builder.add_edge("Graph", "Variant")
-builder.add_edge("Variant", "Solution")
-builder.add_edge("Solution", "Check")
-
-graph = builder.compile()
+__all__ = [
+    "check_graph",
+    "create_graph_graph",
+    "explain_graph",
+    "solution_graph",
+    "solve_graph",
+    "variant_graph",
+]
