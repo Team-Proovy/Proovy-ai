@@ -3,7 +3,7 @@
 EmbeddingSearch → RelevanceCheck → RetrievedDocs 흐름의 뼈대입니다.
 """
 
-from langgraph.graph import StateGraph
+from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState
 
@@ -34,5 +34,6 @@ builder.add_node("RetrievedDocs", retrieved_docs)
 builder.set_entry_point("EmbeddingSearch")
 builder.add_edge("EmbeddingSearch", "RelevanceCheck")
 builder.add_edge("RelevanceCheck", "RetrievedDocs")
+builder.add_edge("RetrievedDocs", END)
 
 graph = builder.compile()
