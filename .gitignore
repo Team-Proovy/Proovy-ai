@@ -37,3 +37,6 @@ Thumbs.db
 # Private credentials
 privatecredentials/*
 !privatecredentials/.gitkeep
+
+# Langgraph Studio
+.langgraph_api
