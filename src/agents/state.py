@@ -1,7 +1,7 @@
 # LangGraph 에이전트들이 공유해서 사용할 상태(state) 정의를 모아두는 곳입니다.
 from typing import Annotated, Literal, List, Dict, Any, Optional
 
-from typing_extensions import TypedDict
+from typing_extensions import TypedDict, NotRequired
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
 import operator
@@ -60,6 +60,8 @@ class ReviewState(BaseModel):
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
+    check_result: NotRequired[Literal["mixed_files", "image_only", "text_only"]]
+
     # Preprocessing Layer
     file_processing: FileProcessing
 
@@ -68,15 +70,15 @@ class AgentState(TypedDict):
 
     # Feature Layer
     feature_results: Annotated[List[Dict[str, Any]], operator.add]
-    solve_result: Optional[SolveResult] = None
-    explain_result: Optional[ExplainResult] = None
-    graph_result: Optional[GraphResult] = None
-    variant_result: Optional[VariantResult] = None
-    solution_result: Optional[SolutionResult] = None
+    solve_result: NotRequired[Optional[SolveResult]]
+    explain_result: NotRequired[Optional[ExplainResult]]
+    graph_result: NotRequired[Optional[GraphResult]]
+    variant_result: NotRequired[Optional[VariantResult]]
+    solution_result: NotRequired[Optional[SolutionResult]]
 
     # Review Layer
     review_state: ReviewState
 
     # Tool/최종 (기본값 추가)
-    tool_outputs: Dict[str, Any] = {}
-    final_output: Dict[str, Any] = {}
+    tool_outputs: NotRequired[Dict[str, Any]]
+    final_output: NotRequired[Dict[str, Any]]
