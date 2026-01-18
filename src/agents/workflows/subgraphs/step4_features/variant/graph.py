@@ -9,6 +9,8 @@ def variant(state: AgentState) -> AgentState:
     """유사 문제 생성 기능 (stub)."""
     print("---FEATURE: VARIANT---")
     # TODO: Implement actual logic for variant
+    state["prev_action"] = "Variant"
+    state["next_action"] = "Executor"
     return state
 
 

@@ -16,6 +16,7 @@ def check_type(state: AgentState) -> AgentState:
     # TODO: 실제 파일 타입 체크 로직 구현
     # state['check_result'] = "text_only"  # 또는 "image_only", "mixed_files"
     print("---CHECKING INPUT TYPE---")
+    state["prev_action"] = "Preprocessing"
     return state
 
 
@@ -28,6 +29,8 @@ def file_convert(state: AgentState) -> AgentState:
 def vision_llm(state: AgentState) -> AgentState:
     """이미지 분석 - OCR + 캡셔닝 (stub)."""
     print("---PROCESSING WITH VISION LLM---")
+    state["prev_action"] = "Preprocessing"
+    state["next_action"] = "Intent"
     return state
 
 
@@ -47,6 +50,8 @@ def route_by_check_type(
     elif "image_only" in check_result:
         return "VisionLLM"
     else:  # "text_only"
+        state["prev_action"] = "Preprocessing"
+        state["next_action"] = "Intent"
         return "__end__"
 
 

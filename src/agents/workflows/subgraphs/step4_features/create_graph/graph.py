@@ -9,6 +9,8 @@ def create_graph(state: AgentState) -> AgentState:
     """그래프 생성 기능 (stub)."""
     print("---FEATURE: CREATE_GRAPH---")
     # TODO: Implement actual logic for create_graph
+    state["prev_action"] = "Create_graph"
+    state["next_action"] = "Executor"
     return state
 
 

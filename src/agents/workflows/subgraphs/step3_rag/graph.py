@@ -28,6 +28,8 @@ def relevance_check_decision(state: AgentState) -> str:
     """RelevanceCheck 이후 분기 제어."""
 
     tool_outputs = state.get("tool_outputs") or {}
+    state["prev_action"] = "RAG"
+    state["next_action"] = "IntentRoute"
     return "inject_docs" if tool_outputs.get("rag_relevance_passed") else "skip_docs"
 
 

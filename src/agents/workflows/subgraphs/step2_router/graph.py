@@ -12,11 +12,24 @@
 
 from typing import Literal
 
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState
+from core.llm import get_model
+from schema.models import OpenRouterModelName
 
 MAX_RETRIES = 2
+
+
+FEATURE_ACTIONS = {
+    "Solve",
+    "Explain",
+    "Create_graph",
+    "Variant",
+    "Solution",
+    "Check",
+}
 
 
 def intent(state: AgentState) -> AgentState:
@@ -24,9 +37,46 @@ def intent(state: AgentState) -> AgentState:
     어떤 경우든 router 그래프는 여기서 종료되고, maingraph가 다음을 결정합니다.
     """
     print("---ROUTER: INTENT DETECTION---")
-    # TODO: 실제 의도 분석 로직
-    # state["needs_rag"] = True  # RAG 호출 필요시
-    # state["intent_result"] = "complex"
+    latest_question = ""
+    messages = state.get("messages") or []
+    if messages:
+        last_message: BaseMessage = messages[-1]
+        content = getattr(last_message, "content", "")
+        latest_question = content.strip() if isinstance(content, str) else ""
+
+    if latest_question:
+        classifier = get_model(OpenRouterModelName.GPT_5_MINI)
+        system_prompt = (
+            "You are a strict classifier. "
+            "Return only 'STEM' if the user's question is about math, physics, "
+            "chemistry, biology, engineering, computer science, or similar STEM subjects. "
+            "Otherwise return 'NON_STEM'."
+        )
+        prompt_messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(
+                content=(
+                    "Question:\n"
+                    f"{latest_question}\n\n"
+                    "Answer with either STEM or NON_STEM."
+                )
+            ),
+        ]
+        try:
+            ai_message = classifier.invoke(prompt_messages)
+            verdict = getattr(ai_message, "content", "")
+            normalized = (verdict or "").strip().upper()
+            is_stem = normalized.startswith("STEM")
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(f"---ROUTER: STEM CLASSIFIER ERROR {exc!r}---")
+            is_stem = True
+
+        state["simple_response"] = not is_stem
+        label = "STEM" if is_stem else "NON_STEM"
+        print(f"---ROUTER: STEM CLASSIFIER RESULT {label}---")
+    else:
+        state["simple_response"] = None
+    state["prev_action"] = "Intent"
     return state
 
 
@@ -66,6 +116,7 @@ def step_router(state: AgentState) -> Literal["__end__"]:
     maingraph는 state의 'current_step'을 보고 적절한 Feature 서브그래프를 호출합니다.
     """
     print("---ROUTER: ROUTING TO FEATURE---")
+    state["prev_action"] = "StepRouter"
     return "__end__"
 
 
@@ -86,13 +137,29 @@ def retry_counter(state: AgentState) -> Literal["Executor", "__end__"]:
     return "Executor"
 
 
-def router_entry(state: AgentState) -> Literal["Intent", "IntentRoute", "RetryCounter"]:
+def router_entry(
+    state: AgentState,
+) -> Literal["Intent", "IntentRoute", "RetryCounter", "Executor"]:
     """
     현재 state를 보고 어느 단계로 진입할지 결정하는 관문 노드
     """
-    # maingraph에서 어떤 값을 설정해 주었는지에 따라 경로 결정
-    # 예: state["next_action"]
-    return state.get("next_action", "Intent")
+    next_action = state.get("next_action")
+    if next_action in {"Intent", "IntentRoute", "RetryCounter", "Executor"}:
+        state.pop("next_action", None)
+        return next_action  # 명시 지정 우선
+
+    prev_action = state.get("prev_action")
+    if prev_action in FEATURE_ACTIONS:
+        return "Executor"
+
+    if prev_action == "Preprocessing":
+        return "Intent"
+    if prev_action == "RAG":
+        return "IntentRoute"
+    if prev_action == "Review":
+        return "RetryCounter"
+
+    return "Intent"
 
 
 # 그래프 구성
@@ -119,6 +186,7 @@ builder.add_conditional_edges(
         "Intent": "Intent",
         "IntentRoute": "IntentRoute",
         "RetryCounter": "RetryCounter",
+        "Executor": "Executor",
     },
 )
 
