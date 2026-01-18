@@ -84,10 +84,20 @@ def retry_counter(state: AgentState) -> Literal["Executor", "__end__"]:
     return "Executor"
 
 
+def router_entry(state: AgentState) -> Literal["Intent", "IntentRoute", "RetryCounter"]:
+    """
+    현재 state를 보고 어느 단계로 진입할지 결정하는 관문 노드
+    """
+    # maingraph에서 어떤 값을 설정해 주었는지에 따라 경로 결정
+    # 예: state["next_action"]
+    return state.get("next_action", "Intent")
+
+
 # 그래프 구성
 builder = StateGraph(AgentState)
 
 # 노드 등록
+builder.add_node("RouterEntry", lambda state: state)
 builder.add_node("Intent", intent)
 builder.add_node(
     "IntentRoute", lambda state: state
@@ -97,10 +107,20 @@ builder.add_node("Executor", executor)
 builder.add_node("StepRouter", step_router)
 builder.add_node("RetryCounter", lambda state: state)  # 재시도 분기 시작점
 
-# 1. 첫 진입점: Intent
-# Preprocessing 후 maingraph에 의해 호출됩니다.
-# RAG를 호출하든, 바로 끝내든 maingraph에게 제어권을 넘기기 위해 항상 END로 갑니다.
-builder.set_entry_point("Intent")
+# 1. RouterEntry: maingraph가 어떤 단계로 진입할지 결정합니다.
+# state["next_action"] 값에 따라 Intent/IntentRoute/RetryCounter 중 하나로 이동합니다.
+builder.set_entry_point("RouterEntry")
+builder.add_conditional_edges(
+    "RouterEntry",
+    router_entry,
+    {
+        "Intent": "Intent",
+        "IntentRoute": "IntentRoute",
+        "RetryCounter": "RetryCounter",
+    },
+)
+
+# RouterEntry가 Intent로 향한 경우, Preprocessing 단계 이후 의도 분석만 수행하고 종료합니다.
 builder.add_edge("Intent", END)
 
 # 2. RAG 후 진입점: IntentRoute에서 분기
