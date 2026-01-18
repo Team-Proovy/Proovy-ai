@@ -6,9 +6,12 @@
 
 from typing import Literal
 
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState
+from core.llm import get_model
+from schema.models import OpenRouterModelName
 
 # 각 서브그래프들을 import 합니다.
 from agents.workflows.subgraphs.step1_preprocessing.graph import (
@@ -45,12 +48,18 @@ def review(state: AgentState) -> Literal["Suggestion", "RetryCounter"]:
     # Flowchart: "Reviewer"
     """실행 결과를 검토하고 다음 단계를 결정합니다 (Pass/Fail)."""
     print("---MAIN: REVIEWING---")
-    # TODO: 실제 검토 로직 구현
-    # pass_review = True # or False
-    # if pass_review:
-    #     return "Suggestion"
-    # return "RetryCounter"
-    return "Suggestion"  # 현재는 항상 Pass로 고정
+    review_state = state.get("review_state")
+    should_retry = False
+    if review_state is not None:
+        passed = getattr(review_state, "passed", True)
+        should_retry = not passed
+
+    if should_retry:
+        state["prev_action"] = "Review"
+        state["next_action"] = "RetryCounter"
+        return "RetryCounter"
+
+    return "Suggestion"  # 기본값은 Pass
 
 
 def suggestion(state: AgentState) -> AgentState:
@@ -58,6 +67,45 @@ def suggestion(state: AgentState) -> AgentState:
     """다음 학습을 제안합니다."""
     print("---MAIN: SUGGESTING NEXT STEP---")
     # TODO: 다음 학습 제안 로직 구현
+    return state
+
+
+def simple_response(state: AgentState) -> AgentState:
+    # Flowchart: "단순 응답"
+    """Router 단계에서 단순 응답으로 판별된 경우 최종 답변을 구성합니다."""
+    print("---MAIN: SIMPLE RESPONSE---")
+    messages = state.get("messages") or []
+    user_text = ""
+    if messages:
+        last_message: BaseMessage = messages[-1]
+        # HumanMessage 또는 user 타입인 경우에만 텍스트를 사용
+        if getattr(last_message, "type", None) in {"human", "user"} and isinstance(
+            getattr(last_message, "content", ""), str
+        ):
+            user_text = last_message.content.strip()
+
+    if not user_text:
+        # 사용자 질문이 없으면 별도 응답을 만들지 않고 그대로 반환
+        return state
+
+    system_prompt = (
+        "You are a friendly Korean tutor chatbot. "
+        "The user asked a non-STEM question. "
+        "Answer briefly and conversationally in natural Korean, "
+        "without complex math or formulas."
+    )
+
+    model = get_model(OpenRouterModelName.GPT_5_MINI)
+    prompt_messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_text),
+    ]
+
+    ai_message = model.invoke(prompt_messages)
+
+    # LangGraph state reducer(add_messages)를 이용해 새 AI 메시지를 추가
+    state["messages"] = (messages or []) + [ai_message]
+    state["prev_action"] = "Simple_response"
     return state
 
 
@@ -84,6 +132,7 @@ for name, graph_obj in FEATURE_MAP.items():
 builder.add_node("Review", review)
 builder.add_node("Suggestion", suggestion)
 builder.add_node("Fallback", fallback)
+builder.add_node("Simple_response", simple_response)
 
 
 # --- 엣지 연결 ---
@@ -93,14 +142,9 @@ builder.set_entry_point("Preprocessing")
 
 # 2. Preprocessing -> Router
 # Preprocessing 서브그래프는 어떤 경우든 종료 후, maingraph로 돌아옵니다.
-# 그 다음은 항상 Router 서브그래프의 기본 진입점('Intent')으로 갑니다.
 builder.add_edge("Preprocessing", "Router")
 
-# 3. Router -> RAG
-# Router가 'Intent' 노드 실행 후 종료되면, RAG를 호출합니다.
-builder.add_edge("Router", "RAG")
-
-# 4. RAG -> Router (IntentRoute)
+# 3. RAG -> Router (IntentRoute)
 # RAG 실행 후, Router 서브그래프의 'IntentRoute' 노드부터 다시 시작합니다.
 # `configurable`을 사용하여 동적으로 시작점을 지정하는 로직이 필요하지만,
 # 여기서는 개념적으로 가장 가까운 Router 노드로 다시 연결합니다.
@@ -113,8 +157,13 @@ builder.add_edge("RAG", "Router")
 # 해당하는 Feature 노드로 분기합니다.
 def route_to_feature(state: AgentState) -> str:
     # Flowchart: "StepRouter"
+    if state.get("simple_response"):
+        return "Simple_response"
+    if state.get("prev_action") == "Intent":
+        return "RAG"
     if state.get("retry_limit_exceeded"):
         return "Fallback"
+
     step = state.get("current_step", "").capitalize()
     if step in builder.nodes:
         return step
@@ -132,8 +181,10 @@ builder.add_conditional_edges(
         "Variant": "Variant",
         "Solution": "Solution",
         "Check": "Check",
+        "RAG": "RAG",
         "Review": "Review",
         "Fallback": "Fallback",
+        "Simple_response": "Simple_response",
     },
 )
 
@@ -172,6 +223,7 @@ builder.add_conditional_edges(
 # 8. 최종 응답 및 종료
 builder.add_edge("Suggestion", END)
 builder.add_edge("Fallback", END)
+builder.add_edge("Simple_response", END)
 
 
 # "agent": "src.agents.workflows.maingraph:graph"
