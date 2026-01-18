@@ -41,16 +41,8 @@ FEATURE_MAP = {
 # --- Main Graph Nodes (서브그래프에 없는 노드들) ---
 
 
-def should_continue(state: AgentState) -> Literal["continue", "end"]:
-    """플랜의 모든 단계가 완료되었는지 확인합니다."""
-    if not state.get("plan"):
-        print("---MAIN: PLAN COMPLETE---")
-        return "end"
-    print("---MAIN: PLAN HAS NEXT STEP---")
-    return "continue"
-
-
 def review(state: AgentState) -> Literal["Suggestion", "RetryCounter"]:
+    # Flowchart: "Reviewer"
     """실행 결과를 검토하고 다음 단계를 결정합니다 (Pass/Fail)."""
     print("---MAIN: REVIEWING---")
     # TODO: 실제 검토 로직 구현
@@ -62,6 +54,7 @@ def review(state: AgentState) -> Literal["Suggestion", "RetryCounter"]:
 
 
 def suggestion(state: AgentState) -> AgentState:
+    # Flowchart: "다음 학습 제안"
     """다음 학습을 제안합니다."""
     print("---MAIN: SUGGESTING NEXT STEP---")
     # TODO: 다음 학습 제안 로직 구현
@@ -69,6 +62,7 @@ def suggestion(state: AgentState) -> AgentState:
 
 
 def fallback(state: AgentState) -> AgentState:
+    # Flowchart: "폴백 응답"
     """재시도 횟수 초과 시 폴백 응답을 처리합니다."""
     print("---MAIN: FALLBACK RESPONSE---")
     # TODO: 폴백 응답 로직 구현
@@ -118,6 +112,7 @@ builder.add_edge("RAG", "Router")
 # Router가 'StepRouter' 노드 실행 후 종료되면, state의 'current_step'에 따라
 # 해당하는 Feature 노드로 분기합니다.
 def route_to_feature(state: AgentState) -> str:
+    # Flowchart: "StepRouter"
     step = state.get("current_step", "").capitalize()
     if step in builder.nodes:
         return step
@@ -125,11 +120,24 @@ def route_to_feature(state: AgentState) -> str:
     return "Review"
 
 
-builder.add_conditional_edges("Router", route_to_feature)
+builder.add_conditional_edges(
+    "Router",
+    route_to_feature,
+    {
+        "Solve": "Solve",
+        "Explain": "Explain",
+        "Create_graph": "Create_graph",
+        "Variant": "Variant",
+        "Solution": "Solution",
+        "Check": "Check",
+        "Review": "Review",
+    },
+)
 
 
 # 6. Features -> Plan 완료 체크
 def route_after_feature(state: AgentState) -> str:
+    # Flowchart: "모든 단계 완료?"
     """Feature 실행 후, 플랜의 다음 단계가 있는지 확인합니다."""
     if not state.get("plan"):  # plan이 비어있으면
         return "Review"
@@ -138,7 +146,14 @@ def route_after_feature(state: AgentState) -> str:
 
 # 각 Feature 노드 실행 후에는 route_after_feature 함수를 통해 분기합니다.
 for name in FEATURE_MAP:
-    builder.add_conditional_edges(name.capitalize(), route_after_feature)
+    builder.add_conditional_edges(
+        name.capitalize(),
+        route_after_feature,
+        {
+            "Router": "Router",
+            "Review": "Review",
+        },
+    )
 
 
 # 7. Review -> Suggestion or RetryCounter
