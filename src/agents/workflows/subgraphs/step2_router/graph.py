@@ -78,8 +78,10 @@ def retry_counter(state: AgentState) -> Literal["Executor", "__end__"]:
     retries = state.get("retry_count", 0) + 1
     state["retry_count"] = retries
     if retries > MAX_RETRIES:
+        state["retry_limit_exceeded"] = True
         print(f"---ROUTER: RETRY LIMIT EXCEEDED ({retries - 1})---")
         return "__end__"
+    state.pop("retry_limit_exceeded", None)
     print(f"---ROUTER: RETRYING ({retries - 1}/{MAX_RETRIES})---")
     return "Executor"
 

@@ -113,6 +113,8 @@ builder.add_edge("RAG", "Router")
 # 해당하는 Feature 노드로 분기합니다.
 def route_to_feature(state: AgentState) -> str:
     # Flowchart: "StepRouter"
+    if state.get("retry_limit_exceeded"):
+        return "Fallback"
     step = state.get("current_step", "").capitalize()
     if step in builder.nodes:
         return step
@@ -131,6 +133,7 @@ builder.add_conditional_edges(
         "Solution": "Solution",
         "Check": "Check",
         "Review": "Review",
+        "Fallback": "Fallback",
     },
 )
 
