@@ -8,6 +8,8 @@ from typing import Literal, List, Dict, Any, Optional, Union
 from pathlib import Path
 from langgraph.graph import END, StateGraph
 from agents.state import AgentState, FileProcessing
+from .preprocessing_utils import pdf_to_images
+from .vision_llm import analyze_images
 
 
 def _ensure_fp(state: AgentState) -> FileProcessing:
@@ -19,14 +21,15 @@ def _ensure_fp(state: AgentState) -> FileProcessing:
         return fp_raw
     if isinstance(fp_raw, dict):
         try:
-            return FileProcessing.model_validate(fp_raw)  
+            return FileProcessing.model_validate(fp_raw)
         except Exception:
             return FileProcessing(**fp_raw)
-    # 예상치 못한 타입이면 기본 인스턴스 반환
     return FileProcessing(file_type="text")
 
 
-def _model_copy(fp_like: Union[FileProcessing, dict], update: Dict[str, Any]) -> FileProcessing:
+def _model_copy(
+    fp_like: Union[FileProcessing, dict], update: Dict[str, Any]
+) -> FileProcessing:
     """dict 또는 FileProcessing 인스턴스 모두 처리하여 model_copy(update=..) 결과 반환."""
     if isinstance(fp_like, FileProcessing):
         fp = fp_like
@@ -41,15 +44,13 @@ def _model_copy(fp_like: Union[FileProcessing, dict], update: Dict[str, Any]) ->
 
 
 def _infer_file_type(input_path_str: Optional[str]) -> str:
-    """간단한 확장자 기반 판별 (pdf/ppt/image/text)."""
+    """간단한 확장자 기반 판별 로직."""
     if not input_path_str:
         return "text"
     name = input_path_str.split("/")[-1].lower()
     if name.endswith(".pdf"):
         return "pdf"
-    if name.endswith((".ppt", ".pptx")):
-        return "ppt"
-    if name.endswith((".png", ".jpg", ".jpeg", ".webp")):
+    if name.endswith((".png", ".jpg", ".jpeg")):
         return "image"
     return "text"
 
@@ -63,25 +64,30 @@ def _detect_upload_in_messages(messages: List[Any]) -> Optional[str]:
         return None
     # 역순으로 최근 메시지부터 검사 (최근 업로드 우선)
     for msg in reversed(messages):
-        # 메시지가 dict로 직렬화된 경우
         if isinstance(msg, dict):
             content = msg.get("content")
-            # content가 list 형태로 파일 메타를 포함할 수 있음
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict):
                         t = item.get("type", "").lower()
-                        if t in {"image_url", "image", "file", "file_upload", "attachment"}:
-                            # 우선적으로 file/url 반환
-                            return item.get("url") or item.get("path") or item.get("name")
+                        if t in {
+                            "image_url",
+                            "image",
+                            "file",
+                            "file_upload",
+                            "attachment",
+                        }:
+                            return (
+                                item.get("url") or item.get("path") or item.get("name")
+                            )
             # 단일 dict content
             if isinstance(content, dict):
                 t = content.get("type", "").lower()
                 if t in {"image_url", "image", "file", "attachment"}:
-                    return content.get("url") or content.get("path") or content.get("name")
+                    return (
+                        content.get("url") or content.get("path") or content.get("name")
+                    )
         else:
-            # BaseMessage-like 객체 (직렬화되지 않은 경우)
-            # 접근 가능한 속성: .content 등 (유연하게 처리)
             try:
                 content = getattr(msg, "content", None)
             except Exception:
@@ -90,23 +96,36 @@ def _detect_upload_in_messages(messages: List[Any]) -> Optional[str]:
                 for item in content:
                     if isinstance(item, dict):
                         t = item.get("type", "").lower()
-                        if t in {"image_url", "image", "file", "file_upload", "attachment"}:
-                            return item.get("url") or item.get("path") or item.get("name")
+                        if t in {
+                            "image_url",
+                            "image",
+                            "file",
+                            "file_upload",
+                            "attachment",
+                        }:
+                            return (
+                                item.get("url") or item.get("path") or item.get("name")
+                            )
             if isinstance(content, dict):
                 t = content.get("type", "").lower()
                 if t in {"image_url", "image", "file", "attachment"}:
-                    return content.get("url") or content.get("path") or content.get("name")
+                    return (
+                        content.get("url") or content.get("path") or content.get("name")
+                    )
             # content가 문자열이고 URL 패턴이면 간단히 URL 반환 (예: pre-signed URL)
-            if isinstance(content, str) and (content.startswith("http://") or content.startswith("https://") or content.startswith("s3://")):
+            if isinstance(content, str) and (
+                content.startswith("http://")
+                or content.startswith("https://")
+                or content.startswith("s3://")
+            ):
                 return content
     return None
-
 
 
 def check_type(state: AgentState) -> AgentState:
     print("--- CHECKTYPE START ---")
     tool_outputs = state.get("tool_outputs") or {}
-    
+
     # 1. 수동 입력 경로 확인
     input_path_str = tool_outputs.get("input_path")
 
@@ -119,7 +138,7 @@ def check_type(state: AgentState) -> AgentState:
             print(f"--- DETECTED FILE: {input_path_str} ---")
 
     inferred = _infer_file_type(input_path_str)
-    
+
     if inferred in {"pdf", "ppt"}:
         category = "mixed_files"
     elif inferred == "image":
@@ -134,44 +153,59 @@ def check_type(state: AgentState) -> AgentState:
 
 
 def file_convert(state: AgentState) -> AgentState:
-    """PDF/PPT -> 이미지 변환 (테스트/모크용 간단 구현)."""
-    print("--- DEBUG: SAFE FILECONVERT (MOCK) ---")
+    print("--- FILECONVERT (REAL) START ---")
     fp = _ensure_fp(state)
-    # 실제 변환 로직은 preprocessing_utils.ppt_to_pdf / pdf_to_images 등으로 대체
-    mock_images = ["mock_page_1.png", "mock_page_2.png"]
-    state["file_processing"] = _model_copy(fp, {"converted_images": mock_images})
+
+    # 1. CheckType에서 판별된 input_path 가져오기
+    input_path = state.get("tool_outputs", {}).get(
+        "input_path"
+    ) or _detect_upload_in_messages(state.get("messages", []))
+
+    if not input_path:
+        print("--- ERROR: NO INPUT PATH FOR CONVERT ---")
+        return state
+
+
+    output_dir = "outputs/temp"
+    try:
+        real_images = pdf_to_images(input_path, output_dir)
+        image_paths = [str(p) for p in real_images]
+        state["file_processing"] = _model_copy(fp, {"converted_images": image_paths})
+    except Exception as e:
+        print(f"--- CONVERT ERROR: {e} ---")
+
     return state
 
 
 def vision_llm(state: AgentState) -> AgentState:
-    """
-    VisionLLM 통합 자리:
-    - 현재는 mock 결과를 채워 테스트가 가능하도록 구현
-    - 실제 통합 시: 여기에 Vision-capable LLM 호출 코드를 넣으면 됩니다.
-      예: vision_model.invoke([HumanMessage(content=[{"type":"image_url","url":...}])])
-    """
-    print("--- DEBUG: SAFE VISIONLLM (MOCK) ---")
+    print("--- VISIONLLM (REAL/MOCK) START ---")
     fp = _ensure_fp(state)
     images = fp.converted_images or []
 
-    # 실제: Vision LLM 호출 예시 
-    #     from your_project.models import vision_model
-    #     # Prepare prompt to extract text & LaTeX
-    #     prompt = "이미지에서 모든 텍스트와 수식을 LaTeX 형식으로 추출해 JSON으로 반환해줘."
-    #     for img in images:
-    #         res = vision_model.invoke([HumanMessage(content=[{"type":"image_url","url": img}]), HumanMessage(content=prompt)])
-    #         # parse res and append to pages/full_text
- 
+    if not images:
+        return state
 
-    # 현재는 mock OCR 결과로 채움
-    mock_pages = [{"image": img, "ocr": f"샘플 텍스트 ({img})", "latex": ""} for img in images]
-    mock_full_text = " ".join(p["ocr"] for p in mock_pages) or "VisionLLM 통합 테스트용 가짜 텍스트입니다."
+    # Studio의 입력 가져오기
+    provider_cfg = state.get("tool_outputs", {}).get("ocr_provider", {"name": "mock"})
 
-    state["file_processing"] = _model_copy(fp, {"ocr_text": {"pages": mock_pages, "full_text": mock_full_text}})
+    try:
+        ocr_result_dict = analyze_images(images, provider_cfg=provider_cfg)
+
+        state["file_processing"] = _model_copy(
+            fp,
+            {
+                "ocr_text": ocr_result_dict  # {"pages": [...], "full_text": "...", "captions": [...]}
+            },
+        )
+    except Exception as e:
+        print(f"--- VISION ERROR: {e} ---")
+
     return state
 
 
-def route_by_check_type(state: AgentState) -> Literal["FileConvert", "VisionLLM", "__end__"]:
+def route_by_check_type(
+    state: AgentState,
+) -> Literal["FileConvert", "VisionLLM", "__end__"]:
     check_result = state.get("check_result", "text_only")
     if check_result == "mixed_files":
         return "FileConvert"

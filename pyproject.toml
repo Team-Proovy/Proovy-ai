@@ -16,6 +16,8 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "langfuse>=3.11.2",
     "langgraph-cli[inmem]>=0.4.11",
+    "pdf2image>=1.17.0",
+    "pillow>=12.1.0",
 ]
 
 [project.optional-dependencies]
