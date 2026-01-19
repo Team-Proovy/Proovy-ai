@@ -25,7 +25,7 @@ MAX_RETRIES = 2
 FEATURE_ACTIONS = {
     "Solve",
     "Explain",
-    "Create_graph",
+    "CreateGraph",
     "Variant",
     "Solution",
     "Check",

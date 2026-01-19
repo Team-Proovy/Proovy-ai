@@ -35,7 +35,7 @@ from agents.workflows.subgraphs.step4_features import (
 FEATURE_MAP = {
     "solve": solve_graph,
     "explain": explain_graph,
-    "create_graph": create_graph_graph,
+    "CreateGraph": create_graph_graph,
     "variant": variant_graph,
     "solution": solution_graph,
     "check": check_graph,
@@ -105,7 +105,7 @@ def simple_response(state: AgentState) -> AgentState:
 
     # LangGraph state reducer(add_messages)를 이용해 새 AI 메시지를 추가
     state["messages"] = (messages or []) + [ai_message]
-    state["prev_action"] = "Simple_response"
+    state["prev_action"] = "SimpleResponse"
     return state
 
 
@@ -177,7 +177,7 @@ builder.add_conditional_edges(
     {
         "Solve": "Solve",
         "Explain": "Explain",
-        "Create_graph": "Create_graph",
+        "CreateGraph": "CreateGraph",
         "Variant": "Variant",
         "Solution": "Solution",
         "Check": "Check",
