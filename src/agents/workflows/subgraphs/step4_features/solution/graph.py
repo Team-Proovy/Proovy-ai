@@ -9,6 +9,8 @@ def solution(state: AgentState) -> AgentState:
     """해설 기능 (stub)."""
     print("---FEATURE: SOLUTION---")
     # TODO: Implement actual logic for solution
+    state["prev_action"] = "Solution"
+    state["next_action"] = "Executor"
     return state
 
 
