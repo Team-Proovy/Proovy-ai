@@ -81,6 +81,7 @@ class AgentState(TypedDict):
     prev_action: Optional[str]
     next_action: Optional[str]
     simple_response: Optional[bool] = None
+    retry_limit_exceeded: Optional[bool] = None
 
     # Tool/최종 (기본값 추가)
     tool_outputs: Dict[str, Any] = {}
