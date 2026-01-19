@@ -4,8 +4,6 @@
 같은 큰 노드들(서브그래프) 사이의 흐름을 제어하는 메인 그래프입니다.
 """
 
-from typing import Literal
-
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
@@ -44,22 +42,25 @@ FEATURE_MAP = {
 # --- Main Graph Nodes (서브그래프에 없는 노드들) ---
 
 
-def review(state: AgentState) -> Literal["Suggestion", "RetryCounter"]:
+def review(state: AgentState) -> AgentState:
     # Flowchart: "Reviewer"
     """실행 결과를 검토하고 다음 단계를 결정합니다 (Pass/Fail)."""
     print("---MAIN: REVIEWING---")
     review_state = state.get("review_state")
     should_retry = False
     if review_state is not None:
-        passed = getattr(review_state, "passed", True)
-        should_retry = not passed
+        if isinstance(review_state, dict):
+            passed = review_state.get("passed", True)
+        else:
+            passed = getattr(review_state, "passed", True)
+    should_retry = not passed
+    state["prev_action"] = "Review"
+    state["next_action"] = "RetryCounter" if should_retry else "Suggestion"
+    return state
 
-    if should_retry:
-        state["prev_action"] = "Review"
-        state["next_action"] = "RetryCounter"
-        return "RetryCounter"
 
-    return "Suggestion"  # 기본값은 Pass
+def route_after_review(state: AgentState) -> str:
+    return state.get("next_action", "Suggestion")
 
 
 def suggestion(state: AgentState) -> AgentState:
@@ -213,7 +214,7 @@ for name in FEATURE_MAP:
 # 7. Review -> Suggestion or RetryCounter
 builder.add_conditional_edges(
     "Review",
-    lambda s: s,
+    route_after_review,
     {
         "Suggestion": "Suggestion",
         "RetryCounter": "Router",  # Router의 'RetryCounter' 노드 호출
