@@ -70,6 +70,7 @@ class AgentState(TypedDict):
     feature_results: Annotated[List[Dict[str, Any]], operator.add]
     solve_result: Optional[SolveResult] = None
     explain_result: Optional[ExplainResult] = None
+
     graph_result: Optional[GraphResult] = None
     variant_result: Optional[VariantResult] = None
     solution_result: Optional[SolutionResult] = None

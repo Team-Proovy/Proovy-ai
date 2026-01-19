@@ -31,12 +31,12 @@ from agents.workflows.subgraphs.step4_features import (
 # --- Feature 서브그래프 매핑 ---
 # StepRouter의 결과('solve', 'explain' 등)와 실제 그래프 객체를 연결합니다.
 FEATURE_MAP = {
-    "solve": solve_graph,
-    "explain": explain_graph,
+    "Solve": solve_graph,
+    "Explain": explain_graph,
     "CreateGraph": create_graph_graph,
-    "variant": variant_graph,
-    "solution": solution_graph,
-    "check": check_graph,
+    "Variant": variant_graph,
+    "Solution": solution_graph,
+    "Check": check_graph,
 }
 
 # --- Main Graph Nodes (서브그래프에 없는 노드들) ---
@@ -203,7 +203,7 @@ def route_after_feature(state: AgentState) -> str:
 # 각 Feature 노드 실행 후에는 route_after_feature 함수를 통해 분기합니다.
 for name in FEATURE_MAP:
     builder.add_conditional_edges(
-        name.capitalize(),
+        name,
         route_after_feature,
         {
             "Router": "Router",
