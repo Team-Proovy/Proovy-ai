@@ -168,6 +168,23 @@ async def _handle_input(
     input: Command | dict[str, Any]
     input = {"messages": [HumanMessage(content=user_input.message)]}
 
+    # files_url 이 설정된 경우, Preprocessing 이 바로 사용할 수 있도록
+    # tool_outputs.input_path / input_files 를 초기 state 에 심어준다.
+    if user_input.files_url:
+        files = list(user_input.files_url)
+        primary = files[0]
+        # 디버그용 로그: files_url 이 실제로 들어오는지 확인
+        logger.info(f"_handle_input: files_url={files}, primary={primary}")
+        tool_outputs: dict[str, Any] = {
+            "input_path": primary,
+            "ocr_provider": {
+                "name": "gemini",
+                "model": "google/gemini-2.5-flash",
+            },
+        }
+        input["tool_outputs"] = tool_outputs
+        input["input_files"] = files
+
     kwargs = {
         "input": input,
         "config": config,

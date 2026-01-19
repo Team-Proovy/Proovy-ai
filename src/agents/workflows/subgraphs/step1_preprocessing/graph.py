@@ -40,11 +40,11 @@ def _infer_file_type(input_path_str: Optional[str]) -> str:
     """확장자 기반 판별 로직 보강."""
     if not input_path_str:
         return "text"
-    
+
     # URL 쿼리 스트링 제거 후 순수 확장자 추출
-    path_clean = input_path_str.split('?')[0]
+    path_clean = input_path_str.split("?")[0]
     ext = Path(path_clean).suffix.lower()
-    
+
     if ext == ".pdf":
         return "pdf"
     if ext in {".png", ".jpg", ".jpeg"}:
@@ -61,10 +61,14 @@ def _detect_upload_in_messages(messages: List[Any]) -> Optional[str]:
     """
     if not messages:
         return None
-        
+
     for msg in reversed(messages):
         # 1. 메시지 객체(HumanMessage 등) 혹은 dict에서 content 추출
-        content = getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
+        content = (
+            getattr(msg, "content", None)
+            if not isinstance(msg, dict)
+            else msg.get("content")
+        )
 
         if not content:
             continue
@@ -76,35 +80,51 @@ def _detect_upload_in_messages(messages: List[Any]) -> Optional[str]:
                     t = item.get("type", "").lower()
                     if t in {"image_url", "image", "file", "file_upload", "attachment"}:
                         # 'file_path' 키를 최우선으로 찾고, 없으면 url/path/name 순으로 탐색
-                        path = item.get("file_path") or item.get("url") or item.get("path") or item.get("name")
-                        if path: return path
-        
+                        path = (
+                            item.get("file_path")
+                            or item.get("url")
+                            or item.get("path")
+                            or item.get("name")
+                        )
+                        if path:
+                            return path
+
         # 3. 단일 dict 형태 처리
         elif isinstance(content, dict):
             t = content.get("type", "").lower()
             if t in {"image_url", "image", "file", "attachment"}:
-                path = content.get("file_path") or content.get("url") or content.get("path") or content.get("name")
-                if path: return path
-        
+                path = (
+                    content.get("file_path")
+                    or content.get("url")
+                    or content.get("path")
+                    or content.get("name")
+                )
+                if path:
+                    return path
+
         # 4. 문자열 형태 처리 (단순 경로 입력 시)
         elif isinstance(content, str):
-            if content.startswith(("http", "s3://")) or content.endswith(('.pdf', '.png', '.jpg', '.jpeg')):
+            if content.startswith(("http", "s3://")) or content.endswith(
+                (".pdf", ".png", ".jpg", ".jpeg")
+            ):
                 return content
-                
+
     return None
 
 
 def check_type(state: AgentState) -> AgentState:
     print("--- CHECKTYPE START ---")
-    
+
     state["prev_action"] = "Preprocessing"
-    
+
     messages = state.get("messages", [])
     tool_outputs = state.get("tool_outputs") or {}
 
     # 1. 파일 경로 찾기 (수동 입력 우선, 그 다음 메시지 탐색)
-    detected_path = tool_outputs.get("input_path") or _detect_upload_in_messages(messages)
-    
+    detected_path = tool_outputs.get("input_path") or _detect_upload_in_messages(
+        messages
+    )
+
     # 2. 파일 타입 판별
     inferred = _infer_file_type(detected_path)
 
@@ -125,11 +145,10 @@ def check_type(state: AgentState) -> AgentState:
     fp = _ensure_fp(state)
     state["check_result"] = category
     # 발견된 파일 경로(path)를 state에 꼭 저장해줘야 다음 노드에서 사용 가능합니다.
-    state["file_processing"] = _model_copy(fp, {
-        "file_type": inferred,
-        "path": detected_path 
-    })
-    
+    state["file_processing"] = _model_copy(
+        fp, {"file_type": inferred, "path": detected_path}
+    )
+
     print(f"--- CHECK RESULT: {category} | PATH: {detected_path} ---")
     """파일 형식 체크 (stub)."""
     # TODO: 실제 파일 타입 체크 로직 구현
@@ -162,12 +181,12 @@ def vision_llm(state: AgentState) -> AgentState:
     print("--- VISIONLLM START ---")
     state["prev_action"] = "Preprocessing"
     state["next_action"] = "Intent"
-    
+
     fp = _ensure_fp(state)
-    
+
     # 1. PDF 변환된 이미지들이 있으면 사용
     images = fp.converted_images
-    
+
     # 2. 만약 PDF 변환이 없었는데(image_only) 단일 이미지 경로가 있다면 리스트로 변환
     if not images and fp.file_type == "image" and fp.path:
         images = [fp.path]
@@ -186,7 +205,7 @@ def vision_llm(state: AgentState) -> AgentState:
 
     """이미지 분석 - OCR + 캡셔닝 (stub)."""
     print("---PROCESSING WITH VISION LLM---")
-    
+
     return state
 
 
@@ -201,9 +220,6 @@ def route_by_check_type(
     if check_result == "image_only":
         return "VisionLLM"
     return "__end__"
-    else:  # "text_only"
-        
-        return "__end__"
 
 
 builder = StateGraph(AgentState)

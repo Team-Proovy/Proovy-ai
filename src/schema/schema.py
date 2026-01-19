@@ -66,6 +66,15 @@ class UserInput(BaseModel):
         default={},
         examples=[{"spicy_level": 0.8}],
     )
+    files_url: list[str] | None = Field(
+        description=(
+            "Preprocessing 에 사용할 파일 URL 리스트. "
+            "예: S3 등에 이미 업로드된 PDF/이미지 URL. "
+            "설정되면 첫 번째 URL 이 tool_outputs.input_path 로 전달된다."
+        ),
+        default=None,
+        examples=[["https://s3.amazonaws.com/your-bucket/test.pdf"]],
+    )
 
 
 class StreamInput(UserInput):

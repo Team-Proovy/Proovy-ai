@@ -40,3 +40,6 @@ privatecredentials/*
 
 # Langgraph Studio
 .langgraph_api
+
+test.pdf
+outputs/
