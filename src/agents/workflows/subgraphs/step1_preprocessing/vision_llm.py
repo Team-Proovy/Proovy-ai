@@ -120,15 +120,34 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
                 if isinstance(response.content, str)
                 else str(response.content)
             )
-
-            # LaTeX 수식의 '\\'가 JSON escape 규칙과 충돌하는 문제 완화
-            clean_content = re.sub(
-                r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})',
-                r"\\\\",
-                raw_content,
-            )
-
-            return json.loads(clean_content)
+            # 1차 시도: 모델이 잘-구성된 JSON을 반환했다고 가정하고 그대로 파싱
+            try:
+                return json.loads(raw_content)
+            except json.JSONDecodeError:
+                # 2차 시도: LaTeX 수식의 '\\' 때문에 JSON 이 깨진 경우를 완화
+                clean_content = re.sub(
+                    r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})',
+                    r"\\\\",
+                    raw_content,
+                )
+                try:
+                    return json.loads(clean_content)
+                except json.JSONDecodeError:
+                    # 3차 시도: 더 이상 구조화된 JSON 으로 파싱할 수 없으면
+                    # 전체 응답을 단일 페이지 OCR 텍스트로 취급하여 반환
+                    logger.warning(
+                        "Gemini JSON 파싱 실패, raw 텍스트를 단일 페이지로 반환합니다."
+                    )
+                    return {
+                        "ocr": [
+                            {
+                                "page": 1,
+                                "ocr_text": raw_content,
+                                "blocks": [],
+                            }
+                        ],
+                        "image_caption": [],
+                    }
         except Exception:
             preview = raw_content[:200] if "raw_content" in locals() else ""
             logger.error(f"OpenRouter Gemini 응답 원본 확인: {preview}...")
