@@ -9,6 +9,8 @@ def explain(state: AgentState) -> AgentState:
     """개념 설명 기능 (stub)."""
     print("---FEATURE: EXPLAIN---")
     # TODO: Implement actual logic for explain
+    state["prev_action"] = "Explain"
+    state["next_action"] = "Executor"
     return state
 
 

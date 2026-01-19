@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.pregel import Pregel
 
+from agents.workflows.maingraph import graph as tutor_graph
 from schema import AgentInfo
 
-# 기본 에이전트 키(아직 구현되지 않은 기본 에이전트)
-DEFAULT_AGENT = ""
+# 기본 에이전트 키
+DEFAULT_AGENT = "tutor"
 
 # LangGraph의 다양한 에이전트 패턴을 다루기 위한 타입 별칭
 # - @entrypoint 함수는 Pregel 을 반환
@@ -23,7 +24,12 @@ class Agent:
 
 
 # 에이전트 레지스트리 - (key: 에이전트 ID, value: Agent)
-agents: dict[str, Agent] = {}
+agents: dict[str, Agent] = {
+    "tutor": Agent(
+        description="Proovy 수학/과학 튜터 에이전트",
+        graph_like=tutor_graph,
+    ),
+}
 
 
 def get_agent(agent_id: str) -> AgentGraph:

@@ -32,6 +32,7 @@ class OpenRouterModelName(StrEnum):
 
     GPT_5 = "openai/gpt-5"
     GPT_5_CODEX = "openai/gpt-5-codex"
+    GPT_5_MINI = "openai/gpt-5-mini"
     GPT_5_1_OPENROUTER = "openai/gpt-5.1"
     GPT_5_1_CODEX = "openai/gpt-5.1-codex"
     GPT_5_1_CODEX_MAX = "openai/gpt-5.1-codex-max"

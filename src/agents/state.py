@@ -79,6 +79,12 @@ class AgentState(TypedDict):
     # Review Layer
     review_state: ReviewState
 
+    # Routing context
+    prev_action: Optional[str]
+    next_action: Optional[str]
+    simple_response: Optional[bool] = None
+    retry_limit_exceeded: Optional[bool] = None
+
     # Tool/최종 (기본값 추가)
     tool_outputs: NotRequired[Dict[str, Any]]
     final_output: NotRequired[Dict[str, Any]]

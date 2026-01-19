@@ -96,6 +96,9 @@ def _detect_upload_in_messages(messages: List[Any]) -> Optional[str]:
 
 def check_type(state: AgentState) -> AgentState:
     print("--- CHECKTYPE START ---")
+    
+    state["prev_action"] = "Preprocessing"
+    
     messages = state.get("messages", [])
     tool_outputs = state.get("tool_outputs") or {}
 
@@ -128,6 +131,10 @@ def check_type(state: AgentState) -> AgentState:
     })
     
     print(f"--- CHECK RESULT: {category} | PATH: {detected_path} ---")
+    """파일 형식 체크 (stub)."""
+    # TODO: 실제 파일 타입 체크 로직 구현
+    # state['check_result'] = "text_only"  # 또는 "image_only", "mixed_files"
+    print("---CHECKING INPUT TYPE---")
     return state
 
 
@@ -153,6 +160,9 @@ def file_convert(state: AgentState) -> AgentState:
 
 def vision_llm(state: AgentState) -> AgentState:
     print("--- VISIONLLM START ---")
+    state["prev_action"] = "Preprocessing"
+    state["next_action"] = "Intent"
+    
     fp = _ensure_fp(state)
     
     # 1. PDF 변환된 이미지들이 있으면 사용
@@ -174,18 +184,26 @@ def vision_llm(state: AgentState) -> AgentState:
     except Exception as e:
         print(f"--- VISION ERROR: {e} ---")
 
+    """이미지 분석 - OCR + 캡셔닝 (stub)."""
+    print("---PROCESSING WITH VISION LLM---")
+    
     return state
 
 
 def route_by_check_type(
     state: AgentState,
 ) -> Literal["FileConvert", "VisionLLM", "__end__"]:
+    state["prev_action"] = "Preprocessing"
+    state["next_action"] = "Intent"
     check_result = state.get("check_result", "text_only")
     if check_result == "mixed_files":
         return "FileConvert"
     if check_result == "image_only":
         return "VisionLLM"
     return "__end__"
+    else:  # "text_only"
+        
+        return "__end__"
 
 
 builder = StateGraph(AgentState)
