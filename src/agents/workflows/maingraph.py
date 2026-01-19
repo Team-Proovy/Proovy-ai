@@ -128,7 +128,8 @@ builder.add_node("Router", router_graph)
 builder.add_node("RAG", rag_graph)
 # 2. Feature 서브그래프 노드들
 for name, graph_obj in FEATURE_MAP.items():
-    builder.add_node(name.capitalize(), graph_obj)
+    # name.capitalize()는 'CreateGraph' -> 'Creategraph'가 되므로, CamelCase는 그대로 써야 함
+    builder.add_node(name, graph_obj)
 # 3. Main 그래프 자체 노드
 builder.add_node("Review", review)
 builder.add_node("Suggestion", suggestion)
@@ -165,7 +166,7 @@ def route_to_feature(state: AgentState) -> str:
     if state.get("retry_limit_exceeded"):
         return "Fallback"
 
-    step = state.get("current_step", "").capitalize()
+    step = state.get("current_step", "")
     if step in builder.nodes:
         return step
     # 플랜의 마지막 단계였거나, 스텝이 없는 경우
