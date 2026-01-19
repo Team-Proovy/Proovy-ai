@@ -35,11 +35,43 @@ class StructuredOCRResponse(BaseModel):
 
 class VisionProvider:
     def analyze(self, images: List[Path], options: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Analyze a list of image files and produce a provider-specific structured response containing OCR results and image captions.
+        
+        Parameters:
+            images (List[Path]): Paths to image files to analyze.
+            options (Dict[str, Any]): Provider-specific options (e.g., {"structured": True}).
+        
+        Returns:
+            Dict[str, Any]: Provider response, typically including keys "ocr" (per-page OCR data) and "image_caption" (list of captions).
+        
+        Raises:
+            NotImplementedError: If the method is not implemented by a subclass.
+        """
         raise NotImplementedError
 
 
 class MockVisionProvider(VisionProvider):
     def analyze(self, images: List[Path], options: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Create a mock OCR response for a sequence of images.
+        
+        Parameters:
+            images (List[Path]): Paths to image files to be "analyzed"; order determines page numbers.
+            options (Dict[str, Any]): Provider-specific options (unused by the mock; can include flags such as "structured").
+        
+        Returns:
+            Dict[str, Any]: A dictionary with two keys:
+                - "ocr": a list of per-page dictionaries each containing:
+                    - "page" (int): 1-based page number corresponding to the image order.
+                    - "ocr_text" (str): aggregated OCR text for the page.
+                    - "blocks" (List[Dict[str, Any]]): list of OCR blocks; each block includes:
+                        - "type" (str): block category (e.g., "latex").
+                        - "text" (str): extracted text.
+                        - "latex" (str, optional): LaTeX source for equation blocks.
+                        - "bbox" (List[int], optional): bounding box as [ymin, xmin, ymax, xmax].
+                - "image_caption": a list of image caption entries (empty for the mock).
+        """
         ocr_list = []
         for idx, img_path in enumerate(images, start=1):
             ocr_list.append(
@@ -66,6 +98,15 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
     """
 
     def __init__(self, model_name: str = "google/gemini-2.5-flash"):
+        """
+        Initialize the provider to call a Gemini model via OpenRouter.
+        
+        Parameters:
+            model_name (str): Model identifier to use (default "google/gemini-2.5-flash").
+        
+        Raises:
+            ValueError: If the OPENROUTER_API_KEY setting is not configured.
+        """
         if not settings.OPENROUTER_API_KEY:
             raise ValueError("OPENROUTER_API_KEY가 설정되지 않았습니다.")
 
@@ -79,6 +120,26 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
         )
 
     def analyze(self, images: List[Path], options: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Send images to the configured Gemini model to extract OCR text and LaTeX-formatted equations, and return the parsed structured OCR response.
+        
+        Parameters:
+            images (List[Path]): Paths to image files; missing files are skipped.
+            options (Dict[str, Any]): Options for analysis (currently unused by implementation but accepted for API compatibility).
+        
+        Returns:
+            Dict[str, Any]: Parsed response with keys:
+                - "ocr": list of page objects each containing:
+                    - "page" (int): page number,
+                    - "ocr_text" (str): full page text,
+                    - "blocks" (List[Dict]): block objects (e.g., {"type":"latex","latex":"...","text":"..."}).
+                - "image_caption": list of image caption objects (may be empty).
+        
+        Behavior notes:
+            - Images are embedded as data URLs (base64) and included with a prompt that requests a specific JSON structure.
+            - The function attempts three JSON-parsing strategies on the model response (direct parse, escape-fix parse, and fallback to treating the entire response as a single-page OCR string).
+            - Exceptions during model invocation are logged and re-raised.
+        """
         image_contents: List[Dict[str, Any]] = []
         for img_path in images:
             if not img_path.exists():
@@ -156,6 +217,15 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
 
 
 def get_provider(cfg: Dict[str, Any]) -> VisionProvider:
+    """
+    Selects and returns a VisionProvider implementation based on the provided configuration and environment.
+    
+    Parameters:
+        cfg (Dict[str, Any]): Configuration dictionary. Recognizes the key `"name"` (case-insensitive) to choose the provider; if omitted, `"mock"` is used.
+    
+    Returns:
+        VisionProvider: An OpenRouterGeminiVisionProvider when `"name"` is `"gemini"` and the OPENROUTER_API_KEY is set; otherwise a MockVisionProvider.
+    """
     name = str(cfg.get("name", "mock")).lower()
     # 항상 OpenRouter 모델명을 직접 사용한다.
     # 외부에서 어떤 model 값이 들어오더라도, Vision 단계에서는
@@ -175,6 +245,19 @@ def get_provider(cfg: Dict[str, Any]) -> VisionProvider:
 def analyze_images(
     image_paths: List[str], provider_cfg: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
+    """
+    Process a list of image file paths with a vision provider and return normalized OCR results.
+    
+    Parameters:
+        image_paths (List[str]): Paths to image files to analyze. Empty or falsy path entries are ignored.
+        provider_cfg (Optional[Dict[str, Any]]): Optional provider configuration (e.g., {"name": "mock"}). If omitted, a mock provider is used.
+    
+    Returns:
+        Dict[str, Any]: A dictionary with:
+            - pages (List[Dict]): List of page objects matching the PageOCR model (each contains `page`, `ocr_text`, and `blocks`).
+            - full_text (str): Concatenation of all page `ocr_text` values separated by two newlines.
+            - captions (List[Dict]): Image caption entries returned by the provider (may be empty).
+    """
     provider_cfg = provider_cfg or {"name": "mock"}
     provider = get_provider(provider_cfg)
     imgs = [Path(p) for p in image_paths if p]

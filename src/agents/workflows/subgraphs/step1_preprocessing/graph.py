@@ -37,7 +37,21 @@ def _model_copy(
 
 
 def _infer_file_type(input_path_str: Optional[str]) -> str:
-    """확장자 기반 판별 로직 보강."""
+    """
+    Infer a canonical file type from a file path or URL by its extension.
+    
+    The function strips any URL query string before examining the file extension. It maps:
+    - ".pdf" -> "pdf"
+    - ".png", ".jpg", ".jpeg" -> "image"
+    - ".ppt", ".pptx" -> "ppt"
+    If no recognizable extension is found or input is None/empty, the result is "text".
+    
+    Parameters:
+        input_path_str (Optional[str]): A file path or URL to inspect; may be None.
+    
+    Returns:
+        str: `"pdf"`, `"image"`, `"ppt"`, or `"text"` according to the inferred file type.
+    """
     if not input_path_str:
         return "text"
 
@@ -56,8 +70,15 @@ def _infer_file_type(input_path_str: Optional[str]) -> str:
 
 def _detect_upload_in_messages(messages: List[Any]) -> Optional[str]:
     """
-    messages 리스트를 훑어 업로드된 파일의 경로를 반환.
-    텍스트와 파일이 섞인 list 형태의 content를 완벽하게 지원합니다.
+    Finds the most recently referenced uploaded file path or URL in a list of messages.
+    
+    Scans messages from newest to oldest and examines each message's content (which may be a string, dict, or list) for common upload indicators (file/path/url/name). When a matching upload is found, its file path or URL is returned.
+    
+    Parameters:
+        messages (List[Any]): Sequence of message objects or dicts whose `content` may contain upload references.
+    
+    Returns:
+        The matched file path or URL as a string, or `None` if no upload reference is found.
     """
     if not messages:
         return None
@@ -113,6 +134,14 @@ def _detect_upload_in_messages(messages: List[Any]) -> Optional[str]:
 
 
 def check_type(state: AgentState) -> AgentState:
+    """
+    Determine the input file type and categorize the next preprocessing step, updating the agent state.
+    
+    Detects an input path from state["tool_outputs"]["input_path"] or from messages, infers the file type, and sets state["check_result"] to one of "text_only", "image_only", or "mixed_files". Also ensures and updates state["file_processing"] with the inferred "file_type" and the detected "path", and sets state["prev_action"] to "Preprocessing".
+    
+    Returns:
+        The updated AgentState with modified "prev_action", "check_result", and "file_processing".
+    """
     print("--- CHECKTYPE START ---")
 
     state["prev_action"] = "Preprocessing"
@@ -178,6 +207,17 @@ def file_convert(state: AgentState) -> AgentState:
 
 
 def vision_llm(state: AgentState) -> AgentState:
+    """
+    Run OCR/vision analysis on images referenced in the agent state and store the results.
+    
+    Examines state["file_processing"] for converted images or, for single-image inputs, the original path; if images are found, performs vision analysis and updates state["file_processing"]. If no images are present, the state is returned unchanged. Errors during analysis are caught and logged; the state is not modified on failure.
+    
+    Parameters:
+        state (AgentState): The agent state containing "file_processing" and optional "tool_outputs".
+    
+    Returns:
+        AgentState: The (possibly) updated agent state with "file_processing" containing an `ocr_text` entry when analysis succeeds.
+    """
     print("--- VISIONLLM START ---")
     state["prev_action"] = "Preprocessing"
     state["next_action"] = "Intent"
@@ -212,6 +252,17 @@ def vision_llm(state: AgentState) -> AgentState:
 def route_by_check_type(
     state: AgentState,
 ) -> Literal["FileConvert", "VisionLLM", "__end__"]:
+    """
+    Selects the next preprocessing node based on the state's check_result.
+    
+    Parameters:
+        state (AgentState): Mutable agent state expected to contain a "check_result" key with one of
+            "mixed_files", "image_only", or other values.
+    
+    Returns:
+        "FileConvert" if "check_result" is "mixed_files", "VisionLLM" if "check_result" is "image_only",
+        "__end__" otherwise.
+    """
     state["prev_action"] = "Preprocessing"
     state["next_action"] = "Intent"
     check_result = state.get("check_result", "text_only")

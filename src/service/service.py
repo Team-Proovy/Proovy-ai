@@ -129,8 +129,26 @@ async def _handle_input(
     user_input: UserInput, agent: AgentGraph
 ) -> tuple[dict[str, Any], UUID]:
     """
-    Parse user input and handle any required interrupt resumption.
-    Returns kwargs for agent invocation and the run_id.
+    Prepare the invocation payload and runtime config for an agent run, and generate a new run identifier.
+    
+    Parameters:
+        user_input: The incoming user request; used fields:
+            - message: text to send as a HumanMessage
+            - thread_id, user_id: optional identifiers (generated when absent)
+            - model: optional model override
+            - agent_config: optional dict merged into the runtime configurable (reserved keys `thread_id`, `user_id`, `model` are rejected)
+            - files_url: optional iterable of file URLs; when present, populates `input["tool_outputs"]["input_path"]`, `input["tool_outputs"]["ocr_provider"]`, and `input_files`
+        agent: The AgentGraph instance to be invoked (kept for context/configuration; not modified here).
+    
+    Returns:
+        A tuple (kwargs, run_id) where:
+        - kwargs (dict): arguments to pass to the agent invocation, containing:
+            - "input": the input payload (includes "messages" and, if files_url was provided, "tool_outputs" and "input_files")
+            - "config": the RunnableConfig with `configurable`, `run_id`, and any tracing callbacks
+        - run_id (UUID): the newly generated run identifier for this invocation.
+    
+    Raises:
+        HTTPException: with status 422 if `agent_config` contains reserved keys (`thread_id`, `user_id`, `model`).
     """
     run_id = uuid4()
     thread_id = user_input.thread_id or str(uuid4())
