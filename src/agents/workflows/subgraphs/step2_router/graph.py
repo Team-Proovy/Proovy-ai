@@ -180,7 +180,7 @@ def router_entry(
     if prev_action == "Review":
         return "RetryCounter"
 
-    return "Intent"
+    return "Executor"
 
 
 # 그래프 구성
