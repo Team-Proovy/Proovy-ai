@@ -75,6 +75,14 @@ class UserInput(BaseModel):
         default=None,
         examples=[["https://s3.amazonaws.com/your-bucket/test.pdf"]],
     )
+    chosen_features: list[str] | None = Field(
+        description=(
+            "실행할 Feature 그래프를 미리 지정할 때 사용하는 선택 목록. "
+            "예: ['Solve', 'Explain']"
+        ),
+        default=None,
+        examples=[["Solve", "Explain"]],
+    )
 
 
 class StreamInput(UserInput):
