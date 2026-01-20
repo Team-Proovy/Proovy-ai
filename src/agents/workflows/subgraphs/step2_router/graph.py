@@ -15,7 +15,7 @@ from typing import Literal
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
-from agents.state import AgentState
+from agents.state import AgentState, FileProcessing
 from core.llm import get_model
 from schema.models import OpenRouterModelName
 
@@ -44,7 +44,28 @@ def intent(state: AgentState) -> AgentState:
         content = getattr(last_message, "content", "")
         latest_question = content.strip() if isinstance(content, str) else ""
 
-    if latest_question:
+    # Preprocessing 단계에서 생성된 OCR 텍스트를 함께 반영
+    ocr_full_text = ""
+    fp = state.get("file_processing")
+    ocr_payload = None
+    if isinstance(fp, FileProcessing):
+        ocr_payload = fp.ocr_text
+    elif isinstance(fp, dict):  # 방어적 처리 (직접 dict 로 넣었을 경우)
+        ocr_payload = fp.get("ocr_text")
+
+    if isinstance(ocr_payload, dict):
+        ocr_full_text = str(ocr_payload.get("full_text") or "")
+    elif isinstance(ocr_payload, str):
+        ocr_full_text = ocr_payload
+
+    if latest_question and ocr_full_text:
+        combined_question = f"{latest_question}\n\n[OCR]\n{ocr_full_text}"
+    elif ocr_full_text:
+        combined_question = ocr_full_text
+    else:
+        combined_question = latest_question
+
+    if combined_question:
         classifier = get_model(OpenRouterModelName.GPT_5_MINI)
         system_prompt = (
             "You are a strict classifier. "
@@ -57,7 +78,7 @@ def intent(state: AgentState) -> AgentState:
             HumanMessage(
                 content=(
                     "Question:\n"
-                    f"{latest_question}\n\n"
+                    f"{combined_question}\n\n"
                     "Answer with either STEM or NON_STEM."
                 )
             ),
