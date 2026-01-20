@@ -10,7 +10,8 @@
 4. (maingraph) → RetryCounter → Executor or END
 """
 
-from typing import Literal
+import json
+from typing import Literal, List, Optional
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
@@ -31,26 +32,56 @@ FEATURE_ACTIONS = {
     "Check",
 }
 
+FEATURE_ALIAS_MAP = {
+    "solve": "Solve",
+    "solving": "Solve",
+    "explain": "Explain",
+    "explanation": "Explain",
+    "creategraph": "CreateGraph",
+    "graph": "CreateGraph",
+    "variant": "Variant",
+    "variation": "Variant",
+    "solution": "Solution",
+    "answer": "Solution",
+    "check": "Check",
+    "verify": "Check",
+}
 
-def intent(state: AgentState) -> AgentState:
-    """사용자 질문의 의도를 파악하고, RAG 호출 필요 여부 등을 결정합니다.
-    어떤 경우든 router 그래프는 여기서 종료되고, maingraph가 다음을 결정합니다.
-    """
-    print("---ROUTER: INTENT DETECTION---")
-    latest_question = ""
+
+def _normalize_feature_name(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    slug = "".join(ch for ch in raw if ch.isalnum()).lower()
+    canonical = FEATURE_ALIAS_MAP.get(slug)
+    if canonical in FEATURE_ACTIONS:
+        return canonical
+    return None
+
+
+def _extract_chosen_features(state: AgentState) -> List[str]:
+    selections = state.get("chosen_features") or []
+    normalized: List[str] = []
+    for item in selections:
+        canonical = _normalize_feature_name(item)
+        if canonical and canonical not in normalized:
+            normalized.append(canonical)
+    return normalized
+
+
+def _collect_user_context(state: AgentState) -> tuple[str, str, str]:
     messages = state.get("messages") or []
+    latest_question = ""
     if messages:
         last_message: BaseMessage = messages[-1]
         content = getattr(last_message, "content", "")
         latest_question = content.strip() if isinstance(content, str) else ""
 
-    # Preprocessing 단계에서 생성된 OCR 텍스트를 함께 반영
     ocr_full_text = ""
     fp = state.get("file_processing")
     ocr_payload = None
     if isinstance(fp, FileProcessing):
         ocr_payload = fp.ocr_text
-    elif isinstance(fp, dict):  # 방어적 처리 (직접 dict 로 넣었을 경우)
+    elif isinstance(fp, dict):
         ocr_payload = fp.get("ocr_text")
 
     if isinstance(ocr_payload, dict):
@@ -59,11 +90,123 @@ def intent(state: AgentState) -> AgentState:
         ocr_full_text = ocr_payload
 
     if latest_question and ocr_full_text:
-        combined_question = f"{latest_question}\n\n[OCR]\n{ocr_full_text}"
+        combined = f"{latest_question}\n\n[OCR]\n{ocr_full_text}"
     elif ocr_full_text:
-        combined_question = ocr_full_text
+        combined = ocr_full_text
     else:
-        combined_question = latest_question
+        combined = latest_question
+    return latest_question, ocr_full_text, combined
+
+
+def _is_complex_intent(question: str) -> bool:
+    if not question:
+        return False
+    classifier = get_model(OpenRouterModelName.GPT_5_MINI)
+    system_prompt = (
+        "You are an intent assessor. "
+        "Return 'MULTI' if the request needs multiple distinct reasoning steps "
+        "(e.g., solve then explain, or create variants after solving). "
+        "Return 'SINGLE' if one feature is enough."
+    )
+    prompt = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"Question:\n{question}\n\nAnswer SINGLE or MULTI."),
+    ]
+    try:
+        verdict = classifier.invoke(prompt)
+        normalized = (getattr(verdict, "content", "") or "").strip().upper()
+        if normalized.startswith("MULTI"):
+            return True
+        if normalized.startswith("SINGLE"):
+            return False
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(f"---ROUTER: COMPLEXITY CLASSIFIER ERROR {exc!r}---")
+    return False
+
+
+def _infer_primary_feature(question: str) -> Optional[str]:
+    if not question:
+        return None
+    allowed = ", ".join(sorted(FEATURE_ACTIONS))
+    system_prompt = (
+        "You map a math-related request to the most suitable feature. "
+        f"Choose exactly one from [{allowed}]."
+    )
+    human_prompt = f"Question:\n{question}\n\nReturn only the chosen feature name."
+    model = get_model(OpenRouterModelName.GPT_5_MINI)
+    try:
+        resp = model.invoke(
+            [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
+        )
+        candidate = (getattr(resp, "content", "") or "").strip()
+        return _normalize_feature_name(candidate)
+    except Exception as exc:  # pragma: no cover
+        print(f"---ROUTER: FEATURE CLASSIFIER ERROR {exc!r}---")
+        return None
+
+
+def _generate_plan_with_model(
+    question: str, hints: Optional[List[str]] = None
+) -> List[str]:
+    hints = hints or []
+    if not question and not hints:
+        return []
+
+    allowed = ", ".join(sorted(FEATURE_ACTIONS))
+    system_prompt = (
+        "You are a meticulous planner for a math tutoring agent. "
+        "Break the task into an ordered list of features chosen from the allowed set. "
+        "Return valid JSON so that downstream code can parse it."
+    )
+    sections: List[str] = []
+    if question:
+        sections.append(f"Question:\n{question}")
+    if hints:
+        sections.append(
+            "User explicitly selected features (respect this order when reasonable): "
+            + ", ".join(hints)
+        )
+    sections.append(
+        'Respond with JSON like {"plan": ["Solve", "Explain"]} where each item '
+        f"belongs to [{allowed}] and there are no duplicates."
+    )
+
+    model = get_model(OpenRouterModelName.GPT_5_1_CODEX_MINI)
+    try:
+        ai_message = model.invoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content="\n\n".join(sections)),
+            ]
+        )
+        raw_content = getattr(ai_message, "content", "")
+        if not isinstance(raw_content, str):
+            raw_content = str(raw_content)
+        parsed = json.loads(raw_content)
+        candidate_steps = parsed.get("plan") if isinstance(parsed, dict) else None
+    except Exception as exc:  # pragma: no cover - best effort parsing
+        print(f"---ROUTER: PLAN PARSING ERROR {exc!r}---")
+        candidate_steps = None
+
+    plan: List[str] = []
+    for hint in hints:
+        if hint in FEATURE_ACTIONS and hint not in plan:
+            plan.append(hint)
+
+    if isinstance(candidate_steps, list):
+        for step in candidate_steps:
+            canonical = _normalize_feature_name(step)
+            if canonical and canonical not in plan:
+                plan.append(canonical)
+    return plan
+
+
+def intent(state: AgentState) -> AgentState:
+    """사용자 질문의 의도를 파악하고, RAG 호출 필요 여부 등을 결정합니다.
+    어떤 경우든 router 그래프는 여기서 종료되고, maingraph가 다음을 결정합니다.
+    """
+    print("---ROUTER: INTENT DETECTION---")
+    latest_question, ocr_full_text, combined_question = _collect_user_context(state)
 
     if combined_question:
         classifier = get_model(OpenRouterModelName.GPT_5_MINI)
@@ -107,38 +250,67 @@ def intent_route(state: AgentState) -> Literal["Planner", "Executor"]:
     - 단일 의도: 바로 실행을 위해 Executor로 이동
     """
     print("---ROUTER: INTENT ROUTING---")
-    # TODO: 실제 단일/복합 의도 분기 로직
-    # if state.get("intent_result") == "complex":
-    #     return "Planner"
-    # return "Executor"
-    return "Planner"  # 현재는 Planner로 고정
+    existing_plan = [
+        step for step in (state.get("plan") or []) if step in FEATURE_ACTIONS
+    ]
+    if existing_plan:
+        state["plan"] = existing_plan
+        return "Executor"
+
+    chosen = _extract_chosen_features(state)
+    if len(chosen) == 1:
+        state["plan"] = chosen.copy()
+        return "Executor"
+    if len(chosen) > 1:
+        return "Planner"
+
+    _, _, combined_question = _collect_user_context(state)
+    requires_planner = _is_complex_intent(combined_question)
+    if requires_planner:
+        return "Planner"
+
+    primary_feature = _infer_primary_feature(combined_question) or "Solve"
+    state["plan"] = [primary_feature]
+    return "Executor"
 
 
 def planner(state: AgentState) -> AgentState:
     """복합 의도에 대한 실행 계획을 수립합니다."""
     print("---ROUTER: PLANNING---")
-    # TODO: 실행 계획 수립 로직
-    # state["plan"] = ["step1: solve", "step2: explain"]
-    # state["retry_count"] = 0
+    _, _, combined_question = _collect_user_context(state)
+    hints = _extract_chosen_features(state)
+    plan = _generate_plan_with_model(combined_question, hints)
+
+    if not plan and hints:
+        plan = hints.copy()
+    if not plan:
+        fallback = _infer_primary_feature(combined_question) or "Solve"
+        plan = [fallback]
+
+    print(f"---ROUTER: PLAN RESULT {plan}---")
+    state["plan"] = plan
+    state["retry_count"] = 0
+    state.pop("current_step", None)
+    state["prev_action"] = "Planner"
     return state
 
 
 def executor(state: AgentState) -> AgentState:
     """수립된 계획의 다음 단계를 실행 준비합니다."""
     print("---ROUTER: EXECUTING STEP---")
-    # TODO: 계획에서 다음 단계(step)를 꺼내 state에 저장하는 로직
-    # plan = state.get("plan", [])
-    # state["current_step"] = plan.pop(0)
+    plan = [step for step in (state.get("plan") or []) if step in FEATURE_ACTIONS]
+
+    if not plan:
+        _, _, combined_question = _collect_user_context(state)
+        hints = _extract_chosen_features(state)
+        fallback = hints[0] if hints else _infer_primary_feature(combined_question)
+        plan = [fallback or "Solve"]
+
+    current_step = plan.pop(0)
+    state["current_step"] = current_step
+    state["plan"] = plan
+    state["prev_action"] = "Executor"
     return state
-
-
-def step_router(state: AgentState) -> Literal["__end__"]:
-    """실행할 단계를 Feature 서브그래프로 라우팅하기 위해 그래프를 종료합니다.
-    maingraph는 state의 'current_step'을 보고 적절한 Feature 서브그래프를 호출합니다.
-    """
-    print("---ROUTER: ROUTING TO FEATURE---")
-    state["prev_action"] = "StepRouter"
-    return "__end__"
 
 
 def retry_counter(state: AgentState) -> Literal["Executor", "__end__"]:
@@ -194,7 +366,6 @@ builder.add_node(
 )  # 분기 시작점 역할만 하는 더미 노드
 builder.add_node("Planner", planner)
 builder.add_node("Executor", executor)
-builder.add_node("StepRouter", step_router)
 builder.add_node("RetryCounter", lambda state: state)  # 재시도 분기 시작점
 
 # 1. RouterEntry: maingraph가 어떤 단계로 진입할지 결정합니다.
@@ -227,13 +398,10 @@ builder.add_conditional_edges(
 
 # 3. 계획 수립 및 실행
 builder.add_edge("Planner", "Executor")
-builder.add_edge("Executor", "StepRouter")
+builder.add_edge("Executor", END)
 
-# 4. Feature 라우팅을 위한 종료
-# StepRouter는 항상 END를 향하며, maingraph가 다음 Feature 서브그래프를 결정합니다.
-builder.add_edge("StepRouter", END)
 
-# 5. 재시도(Retry) 진입점
+# 4. 재시도(Retry) 진입점
 # maingraph는 Reviewer가 'Fail'을 반환하면 'RetryCounter' 노드부터 실행합니다.
 builder.add_conditional_edges(
     "RetryCounter",
