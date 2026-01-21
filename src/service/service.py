@@ -185,6 +185,9 @@ async def _handle_input(
         input["tool_outputs"] = tool_outputs
         input["input_files"] = files
 
+    if user_input.chosen_features:
+        input["chosen_features"] = list(user_input.chosen_features)
+
     kwargs = {
         "input": input,
         "config": config,

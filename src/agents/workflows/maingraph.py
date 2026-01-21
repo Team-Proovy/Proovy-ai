@@ -48,6 +48,8 @@ def review(state: AgentState) -> AgentState:
     print("---MAIN: REVIEWING---")
     review_state = state.get("review_state")
     should_retry = False
+    # review_state가 전혀 설정되지 않은 경우를 대비해 기본값을 True로 둔다.
+    passed = True
     if review_state is not None:
         if isinstance(review_state, dict):
             passed = review_state.get("passed", True)

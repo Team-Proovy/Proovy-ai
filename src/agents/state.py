@@ -84,8 +84,11 @@ class AgentState(TypedDict):
     next_action: Optional[str]
     simple_response: Optional[bool] = None
     retry_limit_exceeded: Optional[bool] = None
+    plan: NotRequired[List[str]]
+    current_step: NotRequired[Optional[str]]
 
     # 업로드/툴/최종 (기본값 추가)
     input_files: NotRequired[List[str]]  # 업로드된 파일들의 로컬 경로 리스트
     tool_outputs: NotRequired[Dict[str, Any]]
     final_output: NotRequired[Dict[str, Any]]
+    chosen_features: NotRequired[List[str]]
