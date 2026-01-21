@@ -94,18 +94,42 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
             )
 
         prompt = (
-            "당신은 수학 문제 분석 전문가입니다. "
-            "이미지에서 텍스트와 모든 수식을 추출하여 반드시 아래 JSON 구조로 출력하세요:\n"
+            "당신은 다양한 종류의 이미지를 읽고 이해하는 멀티모달 OCR & 캡셔닝 전문가입니다. "
+            "주어진 이미지를 보고 텍스트, 수식, 레이아웃 정보를 구조화된 JSON 한 개로 반환하세요.\n\n"
+            "반드시 아래 조건을 지키세요:\n"
+            "1. 오직 하나의 JSON 객체만 출력합니다. 앞뒤에 설명 문장은 쓰지 않습니다.\n"
+            '2. 최상위에는 반드시 "ocr"(리스트), "image_caption"(리스트) 키를 포함합니다.\n'
+            "3. 각 페이지의 전체 텍스트와, 필요하다면 블록 단위 정보(타입, bbox, 수식)를 함께 제공합니다.\n\n"
+            "출력 JSON 스키마 예시는 다음과 같습니다:\n"
             "{\n"
             '  "ocr": [\n'
             "    {\n"
             '      "page": 1,\n'
             '      "ocr_text": "해당 페이지 전체 텍스트",\n'
-            '      "blocks": [{"type": "latex", "latex": "수식", "text": "텍스트"}]\n'
+            '      "blocks": [\n'
+            "        {\n"
+            '          "type": "header | text | latex | equation | page_num | figure | table",\n'
+            '          "text": "블록 내 텍스트 또는 수식 설명",\n'
+            '          "latex": "수식이 있는 경우 LaTeX 표현, 없으면 빈 문자열",\n'
+            '          "bbox": [ymin, xmin, ymax, xmax]\n'
+            "        }\n"
+            "      ]\n"
+            "    }\n"
+            "  ],\n"
+            '  "image_caption": [\n'
+            "    {\n"
+            '      "page": 1,\n'
+            '      "caption": "이 페이지 또는 전체 이미지에 대한 자연어 설명"\n'
             "    }\n"
             "  ]\n"
-            "}\n"
-            "수식은 반드시 'latex' 필드에 LaTeX 문법으로 작성해야 합니다."
+            "}\n\n"
+            "Instructions in English:\n"
+            "- Always return a single JSON object with keys `ocr` and `image_caption`.\n"
+            "- For each page, put the full text into `ocr_text`.\n"
+            "- Optionally split the page into `blocks` with `type`, `text`, optional `latex`, "
+            "and `bbox` = [ymin, xmin, ymax, xmax] in pixels.\n"
+            "- If there is no math, set `latex` to an empty string.\n"
+            "- If you are unsure, still follow the schema and use empty strings or empty arrays instead of omitting keys.\n"
         )
 
         try:
