@@ -2,13 +2,16 @@
 
 from langgraph.graph import END, StateGraph
 
-from agents.state import AgentState
+from agents.state import AgentState, ExplainResult
 
 
 def explain(state: AgentState) -> AgentState:
-    """개념 설명 기능 (stub)."""
     print("---FEATURE: EXPLAIN---")
-    # TODO: Implement actual logic for explain
+    explain_result = state.get("explain_result") or ExplainResult()
+    explain_result.explanation = (
+        explain_result.explanation or "간단한 용어 설명이 준비되지 않았습니다."
+    )
+    state["explain_result"] = explain_result
     state["prev_action"] = "Explain"
     state["next_action"] = "Executor"
     return state
