@@ -231,7 +231,6 @@ def execute_strategy(state: AgentState) -> AgentState:
 
     state["solve_result"] = solve_result
     state["prev_action"] = "Solve_Computation"
-    state["next_action"] = "Review"
     return state
 
 
