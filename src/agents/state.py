@@ -24,15 +24,42 @@ class RouterState(TypedDict):
     target_feature: Literal["solve", "explain", "graph", "variant", "solution"]
 
 
-class SolveResult(BaseModel):
-    answer: str
-    steps: List[str]
-    latex: Optional[str] = None
+class ProblemAnalysis(BaseModel):
+    problem_statement: str
+    domain: str
+    knowns: List[str] = Field(default_factory=list)
+    unknowns: List[str] = Field(default_factory=list)
+    laws: List[str] = Field(default_factory=list)
+    constraints: List[str] = Field(default_factory=list)
+    hints: List[str] = Field(default_factory=list)
+
+
+class SolveStrategy(BaseModel):
+    summary: str
+    steps: List[str] = Field(default_factory=list)
+    generated_code: str
+
+
+class ComputationSummary(BaseModel):
+    success: bool
+    stdout: List[str] = Field(default_factory=list)
+    stderr: List[str] = Field(default_factory=list)
+    text: Optional[str] = None
 
 
 class ExplainResult(BaseModel):
-    explanation: str
-    examples: List[str]
+    explanation: str = ""
+    examples: List[str] = Field(default_factory=list)
+
+
+class SolveResult(BaseModel):
+    problem: Optional[str] = None
+    analysis: Optional[ProblemAnalysis] = None
+    strategy: Optional[SolveStrategy] = None
+    computation: Optional[ComputationSummary] = None
+    answer: Optional[str] = None
+    steps: List[str] = Field(default_factory=list)
+    latex: Optional[str] = None
 
 
 class GraphResult(BaseModel):

@@ -5,7 +5,9 @@ from typing import Annotated, Any
 
 from dotenv import find_dotenv
 from pydantic import (
+    AliasChoices,
     BeforeValidator,
+    Field,
     HttpUrl,
     SecretStr,
     TypeAdapter,
@@ -65,6 +67,10 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: SecretStr | None = None
     OPENROUTER_API_KEY: str | None = None
+    E2B_API_KEY: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("E2B_API_KEY", "E2B_KEY"),
+    )
 
     # DEFAULT_MODEL 이 None 인 경우, model_post_init 에서 자동으로 설정된다.
     DEFAULT_MODEL: AllModelEnum | None = None  # type: ignore[assignment]

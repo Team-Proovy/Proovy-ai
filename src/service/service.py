@@ -58,6 +58,11 @@ from service.utils import (
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
 
+# Reduce noisy INFO logs from the E2B client so sandbox
+# HTTP requests don't look like errors in the service logs.
+logging.getLogger("e2b.api").setLevel(logging.WARNING)
+logging.getLogger("e2b.api.client_sync").setLevel(logging.WARNING)
+
 
 def custom_generate_unique_id(route: APIRoute) -> str:
     """Generate idiomatic operation IDs for OpenAPI client generation."""
@@ -222,6 +227,10 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
         if response_type == "values":
             # Normal response, the agent completed successfully
             output = langchain_to_chat_message(response["messages"][-1])
+            # 최종 상태에 저장된 구조화 결과(final_output)를 함께 포함
+            final_output = response.get("final_output")
+            if final_output is not None:
+                output.custom_data["final_output"] = final_output
         elif response_type == "updates" and "__interrupt__" in response:
             # The last thing to occur was an interrupt
             # Return the value of the first interrupt as an AIMessage
@@ -321,7 +330,7 @@ async def message_generator(
                     chat_message.run_id = str(run_id)
                 except Exception as e:
                     logger.error(f"Error parsing message: {e}")
-                    yield f"data: {json.dumps({'type': 'error', 'content': 'Unexpected error'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'error', 'content': 'Unexpected error'}, ensure_ascii=False)}\n\n"
                     continue
                 # LangGraph re-sends the input message, which feels weird, so drop it
                 if (
@@ -329,7 +338,7 @@ async def message_generator(
                     and chat_message.content == user_input.message
                 ):
                     continue
-                yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()})}\n\n"
+                yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()}, ensure_ascii=False)}\n\n"
 
             if stream_mode == "messages":
                 if not user_input.stream_tokens:
@@ -346,10 +355,10 @@ async def message_generator(
                     # Empty content in the context of OpenAI usually means
                     # that the model is asking for a tool to be invoked.
                     # So we only print non-empty content.
-                    yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)})}\n\n"
+                    yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)}, ensure_ascii=False)}\n\n"
     except Exception as e:
         logger.error(f"Error in message generator: {e}")
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'}, ensure_ascii=False)}\n\n"
     finally:
         yield "data: [DONE]\n\n"
 
