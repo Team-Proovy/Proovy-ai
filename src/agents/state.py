@@ -82,6 +82,8 @@ class ReviewState(BaseModel):
     feedback: Optional[str] = None
     suggestions: List[str] = Field(default_factory=list)
     retry_count: int = 0  # 무한 루프 방지
+    reasons: List[str] = Field(default_factory=list)
+
 
 
 class AgentState(TypedDict):
@@ -104,12 +106,13 @@ class AgentState(TypedDict):
     solution_result: NotRequired[Optional[SolutionResult]]
 
     # Review Layer
-    review_state: ReviewState
+    review_state: NotRequired[ReviewState]
 
     # Routing context
     prev_action: Optional[str]
     next_action: Optional[str]
     simple_response: Optional[bool] = None
+    retry_count: NotRequired[int]
     retry_limit_exceeded: Optional[bool] = None
     plan: NotRequired[List[str]]
     current_step: NotRequired[Optional[str]]

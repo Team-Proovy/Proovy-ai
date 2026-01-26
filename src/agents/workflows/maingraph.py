@@ -4,11 +4,12 @@
 같은 큰 노드들(서브그래프) 사이의 흐름을 제어하는 메인 그래프입니다.
 """
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState
 from core.llm import get_model
+from agents.workflows.review_logic import run_review, run_suggestion
 from schema.models import OpenRouterModelName
 
 # 각 서브그래프들을 import 합니다.
@@ -39,25 +40,68 @@ FEATURE_MAP = {
     "Check": check_graph,
 }
 
+# Review 재시도 상한은 Router의 RetryCounter에서 관리한다.
+
 # --- Main Graph Nodes (서브그래프에 없는 노드들) ---
 
 
 def review(state: AgentState) -> AgentState:
-    # Flowchart: "Reviewer"
-    """실행 결과를 검토하고 다음 단계를 결정합니다 (Pass/Fail)."""
     print("---MAIN: REVIEWING---")
-    review_state = state.get("review_state")
-    should_retry = False
-    # review_state가 전혀 설정되지 않은 경우를 대비해 기본값을 True로 둔다.
+    try:
+        patch = run_review(state) or {}
+    except Exception as exc:
+        print("run_review error:", exc)
+        current_retry = state.get("retry_count", 0)
+        patch = {
+            "review_state": {
+                "passed": False,
+                "feedback": "리뷰 내부 오류(자동 재시도 예정)",
+                "suggestions": [],
+                "retry_count": current_retry,
+            }
+        }
+
+    # 판단 로직 (기존)
+    review_state = patch.get("review_state") or state.get("review_state")
     passed = True
+    retry_count = state.get("retry_count", 0) or 0
     if review_state is not None:
         if isinstance(review_state, dict):
             passed = review_state.get("passed", True)
         else:
             passed = getattr(review_state, "passed", True)
+    if isinstance(review_state, dict):
+        review_state["retry_count"] = retry_count
+
+    # RetryCounter에서 state 업데이트가 누락되므로, 여기서 카운트를 관리한다.
+    retry_count = state.get("retry_count", 0) or 0
+    if not passed:
+        retry_count += 1
+    patch["retry_count"] = retry_count
+
+    # RetryCounter가 업데이트하지 못하는 retry_limit_exceeded도 여기서 관리
+    if not passed and retry_count > 2:
+        patch["retry_limit_exceeded"] = True
+    else:
+        # 기존 값이 남지 않도록 명시적으로 false 처리
+        patch["retry_limit_exceeded"] = False
+
+    if isinstance(review_state, dict):
+        review_state["retry_count"] = retry_count
+
     should_retry = not passed
-    state["prev_action"] = "Review"
-    state["next_action"] = "RetryCounter" if should_retry else "Suggestion"
+    if patch.get("retry_limit_exceeded"):
+        should_retry = False
+
+    # meta
+    patch["prev_action"] = "Review"
+    if patch.get("retry_limit_exceeded"):
+        patch["next_action"] = "Fallback"
+    else:
+        patch["next_action"] = "RetryCounter" if should_retry else "Suggestion"
+
+    # Merge patch into state, then return full state so Studio shows updated state
+    state.update(patch)
     return state
 
 
@@ -66,10 +110,39 @@ def route_after_review(state: AgentState) -> str:
 
 
 def suggestion(state: AgentState) -> AgentState:
-    # Flowchart: "다음 학습 제안"
-    """다음 학습을 제안합니다."""
     print("---MAIN: SUGGESTING NEXT STEP---")
-    # TODO: 다음 학습 제안 로직 구현
+    try:
+        patch = run_suggestion(state) or {}
+    except Exception as exc:
+        print("run_suggestion error:", exc)
+        patch = {
+            "messages": [
+                {"role": "assistant", "content": "제안 생성 중 오류가 발생했습니다. 나중에 다시 시도해주세요."}
+            ],
+            "final_output": {"suggestion_summary": "제안 생성 실패"},
+        }
+
+    patch["prev_action"] = "Suggestion"
+
+    # Merge messages (append) and final_output safely
+    existing_messages = state.get("messages") or []
+    new_messages = patch.pop("messages", [])
+    state["messages"] = existing_messages + new_messages
+
+    # Merge final_output dict
+    if "final_output" in patch:
+        cur_final = state.get("final_output") or {}
+        updated_final = dict(cur_final) if isinstance(cur_final, dict) else {"text": str(cur_final)}
+        pf = patch.pop("final_output")
+        if isinstance(pf, dict):
+            updated_final.update(pf)
+        else:
+            updated_final["suggestion_summary"] = str(pf)
+        state["final_output"] = updated_final
+
+    # Merge any other keys from patch
+    state.update(patch)
+    state["prev_action"] = "Suggestion"
     return state
 
 
@@ -116,7 +189,19 @@ def fallback(state: AgentState) -> AgentState:
     # Flowchart: "폴백 응답"
     """재시도 횟수 초과 시 폴백 응답을 처리합니다."""
     print("---MAIN: FALLBACK RESPONSE---")
-    # TODO: 폴백 응답 로직 구현
+    retry_count = state.get("retry_count", 0)
+    message = AIMessage(
+        content="재시도 한도를 초과하여 폴백 응답으로 전환합니다. 질문을 조금 더 구체적으로 적어주세요."
+    )
+    state["messages"] = (state.get("messages") or []) + [message]
+    final_output = state.get("final_output") or {}
+    updated_final = dict(final_output) if isinstance(final_output, dict) else {"text": str(final_output)}
+    updated_final["fallback"] = {
+        "reason": "retry_limit_exceeded",
+        "retry_count": retry_count,
+    }
+    state["final_output"] = updated_final
+    state["prev_action"] = "Fallback"
     return state
 
 
@@ -221,6 +306,7 @@ builder.add_conditional_edges(
     {
         "Suggestion": "Suggestion",
         "RetryCounter": "Router",  # Router의 'RetryCounter' 노드 호출
+        "Fallback": "Fallback",
     },
 )
 
