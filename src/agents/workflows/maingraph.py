@@ -61,7 +61,6 @@ def review(state: AgentState) -> AgentState:
             }
         }
 
-    # 판단 로직 (기존)
     review_state = patch.get("review_state") or state.get("review_state")
     passed = True
     retry_count = state.get("retry_count", 0) or 0
