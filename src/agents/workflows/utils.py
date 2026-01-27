@@ -48,19 +48,65 @@ def recent_user_context(state: AgentState, *, max_messages: int = 3) -> str:
 
 
 def extract_ocr_text(state: AgentState) -> str:
-    """Preprocessing 단계에서 저장한 OCR 텍스트를 단일 문자열로 병합한다."""
+    """Preprocessing 단계에서 저장한 OCR 블록을 단일 문자열로 병합한다."""
     file_processing = state.get("file_processing")
-    if not file_processing or not getattr(file_processing, "ocr_text", None):
+    if not file_processing:
         return ""
-    ocr_data = getattr(file_processing, "ocr_text") or {}
+    if isinstance(file_processing, dict):
+        ocr_data = file_processing.get("ocr_blocks")
+    else:
+        ocr_data = getattr(file_processing, "ocr_blocks", None)
+    if not ocr_data:
+        return ""
+
+    pages = None
     if isinstance(ocr_data, dict):
-        if ocr_data.get("full_text"):
-            return str(ocr_data["full_text"]).strip()
         pages = ocr_data.get("pages")
-        if isinstance(pages, list):
-            merged = "\n".join(str(page) for page in pages if page)
-            return merged.strip()
-    return str(ocr_data)
+    elif isinstance(ocr_data, list):
+        pages = ocr_data
+    else:
+        pages = getattr(ocr_data, "pages", None)
+
+    if not isinstance(pages, list):
+        return str(ocr_data).strip()
+
+    def _block_text(block: Any) -> str:
+        if isinstance(block, dict):
+            text = block.get("text")
+            latex = block.get("latex")
+        else:
+            text = getattr(block, "text", None)
+            latex = getattr(block, "latex", None)
+        parts: List[str] = []
+        if text:
+            parts.append(str(text).strip())
+        if latex:
+            latex_value = str(latex).strip()
+            if latex_value and latex_value not in parts:
+                parts.append(latex_value)
+        if parts:
+            return "\n".join(parts).strip()
+        if isinstance(block, dict):
+            return ""
+        return str(block).strip()
+
+    page_texts: List[str] = []
+    for page in pages:
+        if isinstance(page, dict):
+            blocks = page.get("blocks") or []
+        else:
+            blocks = getattr(page, "blocks", None) or []
+        if not isinstance(blocks, list):
+            blocks = [blocks]
+        block_texts: List[str] = []
+        for block in blocks:
+            text = _block_text(block)
+            if text:
+                block_texts.append(text)
+        if block_texts:
+            page_texts.append("\n".join(block_texts))
+
+    return "\n\n".join(page_texts).strip()
 
 
 def safe_json_loads(raw: str) -> Dict[str, Any]:

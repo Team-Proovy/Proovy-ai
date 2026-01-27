@@ -16,7 +16,8 @@ from typing import Literal, List, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
-from agents.state import AgentState, FileProcessing
+from agents.state import AgentState
+from agents.workflows.utils import extract_ocr_text
 from core.llm import get_model
 from schema.models import OpenRouterModelName
 
@@ -76,18 +77,7 @@ def _collect_user_context(state: AgentState) -> tuple[str, str, str]:
         content = getattr(last_message, "content", "")
         latest_question = content.strip() if isinstance(content, str) else ""
 
-    ocr_full_text = ""
-    fp = state.get("file_processing")
-    ocr_payload = None
-    if isinstance(fp, FileProcessing):
-        ocr_payload = fp.ocr_text
-    elif isinstance(fp, dict):
-        ocr_payload = fp.get("ocr_text")
-
-    if isinstance(ocr_payload, dict):
-        ocr_full_text = str(ocr_payload.get("full_text") or "")
-    elif isinstance(ocr_payload, str):
-        ocr_full_text = ocr_payload
+    ocr_full_text = extract_ocr_text(state)
 
     if latest_question and ocr_full_text:
         combined = f"{latest_question}\n\n[OCR]\n{ocr_full_text}"
