@@ -24,7 +24,6 @@ class OCRBlock(BaseModel):
 
 class PageOCR(BaseModel):
     page: int = 1
-    ocr_text: str = ""
     blocks: List[OCRBlock] = Field(default_factory=list)
 
 
@@ -45,8 +44,11 @@ class MockVisionProvider(VisionProvider):
             ocr_list.append(
                 {
                     "page": idx,
-                    "ocr_text": f"Mock OCR text for {img_path.name}",
                     "blocks": [
+                        {
+                            "type": "text",
+                            "text": f"Mock OCR text for {img_path.name}",
+                        },
                         {
                             "type": "latex",
                             "text": "a/b",
@@ -61,8 +63,6 @@ class MockVisionProvider(VisionProvider):
 
 class OpenRouterGeminiVisionProvider(VisionProvider):
     """OpenRouter의 google/gemini-2.5-flash 모델을 사용하는 Vision Provider.
-
-    OPENROUTER_API_KEY + OpenAI 호환 Chat API 를 사용한다.
     """
 
     def __init__(self, model_name: str = "google/gemini-2.5-flash"):
@@ -99,13 +99,15 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
             "반드시 아래 조건을 지키세요:\n"
             "1. 오직 하나의 JSON 객체만 출력합니다. 앞뒤에 설명 문장은 쓰지 않습니다.\n"
             '2. 최상위에는 반드시 "ocr"(리스트), "image_caption"(리스트) 키를 포함합니다.\n'
-            "3. 각 페이지의 전체 텍스트와, 필요하다면 블록 단위 정보(타입, bbox, 수식)를 함께 제공합니다.\n\n"
+            "3. 각 페이지는 blocks로만 구성하며, blocks에 페이지의 모든 텍스트/수식을 포함합니다.\n"
+            "4. 입력 이미지 개수와 동일한 길이의 ocr 리스트를 반환하고, 순서를 유지합니다.\n"
+            "5. 텍스트가 거의 없더라도 blocks는 비우지 말고 빈 문자열 블록을 하나 넣습니다.\n\n"
+            "6. 블록은 문단/문제 단위로 최대한 묶어서 반환합니다.\n\n"
             "출력 JSON 스키마 예시는 다음과 같습니다:\n"
             "{\n"
             '  "ocr": [\n'
             "    {\n"
             '      "page": 1,\n'
-            '      "ocr_text": "해당 페이지 전체 텍스트",\n'
             '      "blocks": [\n'
             "        {\n"
             '          "type": "header | text | latex | equation | page_num | figure | table",\n'
@@ -125,8 +127,13 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
             "}\n\n"
             "Instructions in English:\n"
             "- Always return a single JSON object with keys `ocr` and `image_caption`.\n"
-            "- For each page, put the full text into `ocr_text`.\n"
-            "- Optionally split the page into `blocks` with `type`, `text`, optional `latex`, "
+            "- For each page, return only `page` and `blocks` (do not include `ocr_text`).\n"
+            "- All readable text must appear in `blocks`.\n"
+            "- The `ocr` array length must match the number of input images (keep order).\n"
+            "- If text is missing, include one block with empty text instead of an empty list.\n"
+            "- `image_caption` must be written in Korean.\n"
+            "- Prefer paragraph or question-level blocks; do not split one sentence into many blocks.\n"
+            "- Split the page into `blocks` with `type`, `text`, optional `latex`, "
             "and `bbox` = [ymin, xmin, ymax, xmax] in pixels.\n"
             "- If there is no math, set `latex` to an empty string.\n"
             "- If you are unsure, still follow the schema and use empty strings or empty arrays instead of omitting keys.\n"
@@ -138,40 +145,88 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
             )
             response = self.model.invoke([human])
 
-            # ChatOpenAI는 일반적으로 단일 문자열 content를 반환한다.
-            raw_content = (
-                response.content
-                if isinstance(response.content, str)
-                else str(response.content)
-            )
-            # 1차 시도: 모델이 잘-구성된 JSON을 반환했다고 가정하고 그대로 파싱
-            try:
-                return json.loads(raw_content)
-            except json.JSONDecodeError:
-                # 2차 시도: LaTeX 수식의 '\\' 때문에 JSON 이 깨진 경우를 완화
-                clean_content = re.sub(
+           
+            raw_content = response.content
+            if isinstance(raw_content, list):
+                parts: List[str] = []
+                for chunk in raw_content:
+                    if isinstance(chunk, dict):
+                        parts.append(
+                            str(
+                                chunk.get("text")
+                                or chunk.get("content")
+                                or chunk.get("data")
+                                or ""
+                            )
+                        )
+                    else:
+                        parts.append(str(chunk))
+                raw_content = "".join(parts)
+            elif not isinstance(raw_content, str):
+                raw_content = str(raw_content)
+            def _candidate_strings(text: str) -> List[str]:
+                stripped = text.strip()
+                candidates: List[str] = []
+                if stripped:
+                    candidates.append(stripped)
+                if "```" in text:
+                    for part in text.split("```"):
+                        part = part.strip()
+                        if not part or part.lower().startswith("json"):
+                            continue
+                        candidates.append(part)
+                start = text.find("{")
+                end = text.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    candidates.append(text[start : end + 1].strip())
+                # 중복 제거 (순서 유지)
+                seen = set()
+                uniq: List[str] = []
+                for item in candidates:
+                    if item in seen:
+                        continue
+                    seen.add(item)
+                    uniq.append(item)
+                return uniq
+
+            def _try_load_json(text: str) -> Dict[str, Any] | None:
+                # 1차: 원문 그대로 파싱
+                for candidate in _candidate_strings(text):
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        continue
+                # 2차: LaTeX 수식의 '\\' 때문에 JSON 이 깨진 경우를 완화
+                clean_text = re.sub(
                     r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})',
                     r"\\\\",
-                    raw_content,
+                    text,
                 )
-                try:
-                    return json.loads(clean_content)
-                except json.JSONDecodeError:
-                    # 3차 시도: 더 이상 구조화된 JSON 으로 파싱할 수 없으면
-                    # 전체 응답을 단일 페이지 OCR 텍스트로 취급하여 반환
-                    logger.warning(
-                        "Gemini JSON 파싱 실패, raw 텍스트를 단일 페이지로 반환합니다."
-                    )
-                    return {
-                        "ocr": [
-                            {
-                                "page": 1,
-                                "ocr_text": raw_content,
-                                "blocks": [],
-                            }
-                        ],
-                        "image_caption": [],
+                for candidate in _candidate_strings(clean_text):
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        continue
+                return None
+
+            parsed = _try_load_json(raw_content)
+            if parsed is not None:
+                return parsed
+
+            # 3차 시도: 더 이상 구조화된 JSON 으로 파싱할 수 없으면
+            # 전체 응답을 단일 페이지 OCR 텍스트로 취급하여 반환
+            logger.warning(
+                "Gemini JSON 파싱 실패, raw 텍스트를 단일 페이지로 반환합니다."
+            )
+            return {
+                "ocr": [
+                    {
+                        "page": 1,
+                        "blocks": [{"type": "text", "text": raw_content}],
                     }
+                ],
+                "image_caption": [],
+            }
         except Exception:
             preview = raw_content[:200] if "raw_content" in locals() else ""
             logger.error(f"OpenRouter Gemini 응답 원본 확인: {preview}...")
@@ -181,9 +236,7 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
 
 def get_provider(cfg: Dict[str, Any]) -> VisionProvider:
     name = str(cfg.get("name", "mock")).lower()
-    # 항상 OpenRouter 모델명을 직접 사용한다.
-    # 외부에서 어떤 model 값이 들어오더라도, Vision 단계에서는
-    # google/gemini-2.5-flash 하나만 고정 사용한다.
+
     model_name = "google/gemini-2.5-flash"
 
     print(
@@ -204,38 +257,143 @@ def analyze_images(
     imgs = [Path(p) for p in image_paths if p]
 
     try:
+        def _normalize_ocr_list(raw_ocr: Any) -> List[Any]:
+            if raw_ocr is None:
+                return []
+            if isinstance(raw_ocr, list):
+                return raw_ocr
+            return [raw_ocr]
+
+        def _parse_pages(raw: Any) -> tuple[List[PageOCR], List[Dict[str, Any]]]:
+            if not isinstance(raw, dict):
+                return [], []
+            raw_ocr_list = _normalize_ocr_list(raw.get("ocr"))
+            if raw_ocr_list and not isinstance(raw_ocr_list[0], dict):
+                raw_ocr_list = [
+                    {
+                        "page": idx + 1,
+                        "blocks": [{"type": "text", "text": str(item)}],
+                    }
+                    for idx, item in enumerate(raw_ocr_list)
+                ]
+
+            parsed_pages: List[PageOCR] = []
+            extra_captions: List[Dict[str, Any]] = []
+            for i, p_data in enumerate(raw_ocr_list):
+                try:
+                    if isinstance(p_data, dict):
+                        if isinstance(p_data.get("image_caption"), list):
+                            extra_captions.extend(p_data.get("image_caption") or [])
+                        has_blocks = bool(p_data.get("blocks"))
+                        has_text = bool(p_data.get("text") or p_data.get("ocr_text"))
+                        if p_data.get("caption") and not has_blocks and not has_text:
+                            extra_captions.append(
+                                {
+                                    "page": p_data.get("page", i + 1),
+                                    "caption": p_data.get("caption"),
+                                }
+                            )
+                            continue
+                        page_num = p_data.get("page", i + 1)
+                        blocks_data = p_data.get("blocks") or []
+                        if not isinstance(blocks_data, list):
+                            blocks_data = [blocks_data]
+                        if not blocks_data:
+                            fallback_text = (
+                                p_data.get("text") or p_data.get("ocr_text") or ""
+                            )
+                            if fallback_text:
+                                blocks_data = [
+                                    {"type": "text", "text": str(fallback_text)}
+                                ]
+                    else:
+                        page_num = i + 1
+                        blocks_data = [{"type": "text", "text": str(p_data)}]
+
+                    p_obj = PageOCR(
+                        page=page_num,
+                        blocks=[
+                            OCRBlock(**b)
+                            if isinstance(b, dict)
+                            else OCRBlock(text=str(b))
+                            for b in blocks_data
+                        ],
+                    )
+                    parsed_pages.append(p_obj)
+                except Exception:
+                    continue
+            return parsed_pages, extra_captions
+
+        def _pick_caption_text(raw: Any, page_num: int) -> str:
+            if not isinstance(raw, dict):
+                return ""
+            captions = raw.get("image_caption")
+            if not isinstance(captions, list):
+                return ""
+            for item in captions:
+                if (
+                    isinstance(item, dict)
+                    and item.get("page") == page_num
+                    and item.get("caption")
+                ):
+                    return str(item.get("caption")).strip()
+            for item in captions:
+                if isinstance(item, dict) and item.get("caption"):
+                    return str(item.get("caption")).strip()
+            return ""
+
         resp_raw = provider.analyze(imgs, options={"structured": True})
+        captions = resp_raw.get("image_caption", []) if isinstance(resp_raw, dict) else []
+        pages, extra_captions = _parse_pages(resp_raw)
+        if extra_captions:
+            captions = list(captions or []) + extra_captions
 
-        raw_ocr_list = resp_raw.get("ocr", [])
+        if not pages and imgs:
+            logger.warning("OCR 결과가 비어 있어 페이지 단위로 재시도합니다.")
+            fallback_pages: List[PageOCR] = []
+            fallback_captions: List[Dict[str, Any]] = []
+            for idx, img in enumerate(imgs, start=1):
+                try:
+                    single_raw = provider.analyze([img], options={"structured": True})
+                except Exception as exc:
+                    logger.warning(f"페이지 OCR 재시도 실패(page={idx}): {exc}")
+                    continue
 
-        if raw_ocr_list and not isinstance(raw_ocr_list[0], dict):
-            raw_ocr_list = [{"page": 1, "ocr_text": str(raw_ocr_list), "blocks": []}]
+                if isinstance(single_raw, dict):
+                    fallback_captions.extend(single_raw.get("image_caption") or [])
 
-        pages = []
-        for i, p_data in enumerate(raw_ocr_list):
-            try:
-                p_obj = PageOCR(
-                    page=p_data.get("page", i + 1),
-                    ocr_text=p_data.get("ocr_text") or p_data.get("text", ""),
-                    blocks=[
-                        OCRBlock(**b) if isinstance(b, dict) else OCRBlock(text=str(b))
-                        for b in p_data.get("blocks", [])
-                    ],
-                )
-                pages.append(p_obj)
-            except Exception:
-                continue
+                single_pages, extra_single = _parse_pages(single_raw)
+                if extra_single:
+                    fallback_captions.extend(extra_single)
+                if not single_pages:
+                    caption_text = _pick_caption_text(single_raw, idx)
+                    if caption_text:
+                        single_pages = [
+                            PageOCR(
+                                page=idx,
+                                blocks=[OCRBlock(type="text", text=caption_text)],
+                            )
+                        ]
+
+                for page in single_pages:
+                    if not page.page:
+                        page.page = idx
+                    fallback_pages.append(page)
+
+            if fallback_pages:
+                pages = fallback_pages
+            if not captions and fallback_captions:
+                captions = fallback_captions
 
         formatted_result = {
             "pages": [p.model_dump() for p in pages],
-            "full_text": "\n\n".join([p.ocr_text for p in pages if p.ocr_text]),
-            "captions": resp_raw.get("image_caption", []),
+            "captions": captions,
         }
         return formatted_result
 
     except Exception as e:
         logger.error(f"비전 분석 프로세스 실패: {e}")
-        return {"pages": [], "full_text": f"분석 실패: {str(e)}", "captions": []}
+        return {"pages": [], "captions": [], "error": f"분석 실패: {str(e)}"}
 
 
 if __name__ == "__main__":

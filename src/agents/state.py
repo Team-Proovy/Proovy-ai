@@ -13,7 +13,7 @@ class FileProcessing(BaseModel):
 
     file_type: Literal["pdf", "ppt", "image", "text", "canvas"]
     converted_images: Optional[List[str]] = Field(default_factory=list)
-    ocr_text: Optional[Dict[str, Any]] = None  # {"pages": [...], "full_text": "..."}
+    ocr_blocks: Optional[Dict[str, Any]] = None  # {"pages": [...], "captions": [...]}
 
 
 class RouterState(TypedDict):
