@@ -1,223 +1,238 @@
 """Preprocessing subgraph.
 
 플로우차트의 Preprocessing 영역(CheckType → FileConvert → VisionLLM)
-을 담당하는 LangGraph 서브그래프의 구현입니다.
+을 담당하는 LangGraph 서브그래프의 뼈대 구현입니다.
 """
 
-from typing import Literal, List, Dict, Any, Optional, Union
+from typing import Literal, List, Dict, Any, Optional
 from pathlib import Path
+
 from langgraph.graph import END, StateGraph
 from agents.state import AgentState, FileProcessing
-from .preprocessing_utils import pdf_to_images
-from .vision_llm import analyze_images
 
+from agents.workflows.subgraphs.step1_preprocessing import preprocessing_utils
+from agents.workflows.subgraphs.step1_preprocessing.vision_llm import analyze_images
 
-def _ensure_fp(state: AgentState) -> FileProcessing:
-    """state['file_processing']가 dict/None/인스턴스 여건에 상관없이 안전한 Pydantic 인스턴스 반환."""
-    fp_raw = state.get("file_processing")
-    if fp_raw is None:
-        return FileProcessing(file_type="text")
-    if isinstance(fp_raw, FileProcessing):
-        return fp_raw
-    if isinstance(fp_raw, dict):
-        try:
-            return FileProcessing.model_validate(fp_raw)
-        except Exception:
-            return FileProcessing(**fp_raw)
-    return FileProcessing(file_type="text")
+# --- 헬퍼들  ---
 
-
-def _model_copy(
-    fp_like: Union[FileProcessing, dict], update: Dict[str, Any]
-) -> FileProcessing:
-    """dict 또는 FileProcessing 인스턴스 모두 처리하여 model_copy(update=..) 결과 반환."""
-    # state 형태의 dict를 넣어 _ensure_fp 호출
-    fp = _ensure_fp({"file_processing": fp_like})
+def _model_copy(fp: FileProcessing, update: Dict[str, Any]) -> FileProcessing:
+    """Pydantic v2 환경: model_copy(update=...)로 새 인스턴스 반환."""
     return fp.model_copy(update=update)
 
 
+def _ensure_fp(state: AgentState) -> FileProcessing:
+    fp = state.get("file_processing")
+    if fp is None:
+        fp = FileProcessing(file_type="text")
+    return fp
+
+
+def _is_s3_uri(uri: Optional[str]) -> bool:
+    return isinstance(uri, str) and uri.startswith("s3://")
+
+
 def _infer_file_type(input_path_str: Optional[str]) -> str:
-    """확장자 기반 판별 로직 보강."""
+    """
+    입력 문자열(로컬 경로 또는 s3 URI) 또는 None을 받아
+    'pdf' | 'image' | 'text' 반환.
+    """
     if not input_path_str:
         return "text"
-
-    # URL 쿼리 스트링 제거 후 순수 확장자 추출
-    path_clean = input_path_str.split("?")[0]
-    ext = Path(path_clean).suffix.lower()
-
-    if ext == ".pdf":
+    cleaned = input_path_str.split("?")[0].split("#")[0]
+    name = Path(cleaned.split("/")[-1]).name  # s3 또는 local 모두 처리
+    suffix = Path(name).suffix.lower()
+    if suffix == ".pdf":
         return "pdf"
-    if ext in {".png", ".jpg", ".jpeg"}:
+    if suffix in {".png", ".jpg", ".jpeg"}:
         return "image"
-    if ext in {".ppt", ".pptx"}:
-        return "ppt"
     return "text"
 
 
-def _detect_upload_in_messages(messages: List[Any]) -> Optional[str]:
+def _localize_input_path(input_path_str: str, tmp_dir: Path) -> Path:
     """
-    messages 리스트를 훑어 업로드된 파일의 경로를 반환.
-    텍스트와 파일이 섞인 list 형태의 content를 완벽하게 지원합니다.
+    s3:// URI면 preprocessing_utils.download_s3_to_local을 호출해 로컬 Path 반환.
+    로컬이면 Path로 바로 반환.
     """
-    if not messages:
+    if _is_s3_uri(input_path_str):
+        if not hasattr(preprocessing_utils, "download_s3_to_local"):
+            raise RuntimeError(
+                "S3 입력을 처리하려면 'preprocessing_utils.download_s3_to_local(s3_uri, target_dir)' "
+                "함수가 구현되어 있어야 합니다."
+            )
+        return preprocessing_utils.download_s3_to_local(input_path_str, tmp_dir)
+    return Path(input_path_str)
+
+
+def _extract_path_from_file_item(item: Any) -> Optional[str]:
+    if not item:
         return None
-
-    for msg in reversed(messages):
-        # 1. 메시지 객체(HumanMessage 등) 혹은 dict에서 content 추출
-        content = (
-            getattr(msg, "content", None)
-            if not isinstance(msg, dict)
-            else msg.get("content")
-        )
-
-        if not content:
-            continue
-
-        # 2. 리스트 형태 처리 (텍스트 + 파일 혼합 입력 시 핵심 로직)
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict):
-                    t = item.get("type", "").lower()
-                    if t in {"image_url", "image", "file", "file_upload", "attachment"}:
-                        # 'file_path' 키를 최우선으로 찾고, 없으면 url/path/name 순으로 탐색
-                        path = (
-                            item.get("file_path")
-                            or item.get("url")
-                            or item.get("path")
-                            or item.get("name")
-                        )
-                        if path:
-                            return path
-
-        # 3. 단일 dict 형태 처리
-        elif isinstance(content, dict):
-            t = content.get("type", "").lower()
-            if t in {"image_url", "image", "file", "attachment"}:
-                path = (
-                    content.get("file_path")
-                    or content.get("url")
-                    or content.get("path")
-                    or content.get("name")
-                )
-                if path:
-                    return path
-
-        # 4. 문자열 형태 처리 (단순 경로 입력 시)
-        elif isinstance(content, str):
-            if content.startswith(("http", "s3://")) or content.endswith(
-                (".pdf", ".png", ".jpg", ".jpeg")
-            ):
-                return content
-
+    if isinstance(item, (str, Path)):
+        return str(item)
+    if isinstance(item, dict):
+        for key in ("path", "file_path", "url", "s3_uri", "filename", "name", "file_name"):
+            value = item.get(key)
+            if value:
+                return str(value)
     return None
 
 
+def _collect_input_paths(state: AgentState, tool_outputs: Dict[str, Any]) -> List[str]:
+    candidates: List[str] = []
+    input_path_str = tool_outputs.get("input_path")
+    if input_path_str:
+        candidates.append(str(input_path_str))
+
+    input_files = state.get("input_files") or tool_outputs.get("input_files") or []
+    if isinstance(input_files, (str, Path)):
+        input_files = [input_files]
+    if isinstance(input_files, list):
+        for item in input_files:
+            extracted = _extract_path_from_file_item(item)
+            if extracted:
+                candidates.append(extracted)
+
+    # 중복 제거(순서 유지)
+    seen = set()
+    unique: List[str] = []
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
+
+
+def _primary_input_path(state: AgentState, tool_outputs: Dict[str, Any]) -> Optional[str]:
+    paths = _collect_input_paths(state, tool_outputs)
+    return paths[0] if paths else None
+
+
+def _infer_primary_type_from_paths(paths: List[str]) -> str:
+    if any(_infer_file_type(p) == "pdf" for p in paths):
+        return "pdf"
+    if any(_infer_file_type(p) == "image" for p in paths):
+        return "image"
+    return "text"
+
+
+def _pick_preferred_path(paths: List[str], preferred: set[str]) -> Optional[str]:
+    for path in paths:
+        if _infer_file_type(path) in preferred:
+            return path
+    return paths[0] if paths else None
+
+
+
 def check_type(state: AgentState) -> AgentState:
-    print("--- CHECKTYPE START ---")
-
-    state["prev_action"] = "Preprocessing"
-
-    messages = state.get("messages", [])
+    """파일 유형 판별 및 file_processing.file_type 업데이트."""
+    print("--- CHECKTYPE ---")
     tool_outputs = state.get("tool_outputs") or {}
-
-    # 1. 파일 경로 찾기 (수동 입력 우선, 그 다음 메시지 탐색)
-    detected_path = tool_outputs.get("input_path") or _detect_upload_in_messages(
-        messages
-    )
-
-    # 2. 파일 타입 판별
-    inferred = _infer_file_type(detected_path)
-
-    # 3. 분류 로직 (텍스트 혼합 여부와 상관없이 파일 성격에 따라 분기)
-    if detected_path:
-        if inferred in {"pdf", "ppt"}:
-            # 변환 과정이 필요한 경우
-            category = "mixed_files"
-        elif inferred == "image":
-            # 바로 비전 분석이 가능한 경우
-            category = "image_only"
-        else:
-            category = "text_only"
+    paths = _collect_input_paths(state, tool_outputs)
+    inferred = _infer_primary_type_from_paths(paths) if paths else _infer_file_type(None)
+    if inferred == "pdf":
+        category = "mixed_files"
+    elif inferred == "image":
+        category = "image_only"
     else:
         category = "text_only"
 
-    # 4. State 업데이트
     fp = _ensure_fp(state)
     state["check_result"] = category
-    # 발견된 파일 경로(path)를 state에 꼭 저장해줘야 다음 노드에서 사용 가능합니다.
-    state["file_processing"] = _model_copy(
-        fp, {"file_type": inferred, "path": detected_path}
-    )
-
-    print(f"--- CHECK RESULT: {category} | PATH: {detected_path} ---")
-    """파일 형식 체크 (stub)."""
-    # TODO: 실제 파일 타입 체크 로직 구현
-    # state['check_result'] = "text_only"  # 또는 "image_only", "mixed_files"
-    print("---CHECKING INPUT TYPE---")
+    state["file_processing"] = _model_copy(fp, {"file_type": inferred})
     return state
 
 
 def file_convert(state: AgentState) -> AgentState:
-    print("--- FILECONVERT START ---")
-    fp = _ensure_fp(state)
-    input_path = fp.path  # CheckType에서 저장한 경로를 사용
-
-    if not input_path:
-        print("--- ERROR: NO INPUT PATH FOR CONVERT ---")
+    """
+    PDF -> 페이지별 이미지 변환.
+    이 노드는 'mixed_files'일 때 호출.
+    """
+    print("--- FILECONVERT ---")
+    tool_outputs = state.get("tool_outputs") or {}
+    paths = _collect_input_paths(state, tool_outputs)
+    input_path_str = _pick_preferred_path(paths, {"pdf"})
+    if not input_path_str:
         return state
 
-    output_dir = "outputs/temp"
-    try:
-        real_images = pdf_to_images(input_path, output_dir)
-        image_paths = [str(p) for p in real_images]
-        state["file_processing"] = _model_copy(fp, {"converted_images": image_paths})
-    except Exception as e:
-        print(f"--- CONVERT ERROR: {e} ---")
+    tmp_dir_base = Path(tool_outputs.get("tmp_dir", "/tmp/lang_preprocess"))
+    tmp_dir_name = Path(input_path_str.split("/")[-1]).stem
+    tmp_dir = tmp_dir_base / tmp_dir_name
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
+    local_input = _localize_input_path(input_path_str, tmp_dir)
+
+    fp = _ensure_fp(state)
+    suffix = local_input.suffix.lower()
+
+    if suffix != ".pdf":
+        return state
+    pdf_path = local_input
+
+    # PDF -> 페이지 이미지
+    image_paths: List[Path] = preprocessing_utils.pdf_to_images(pdf_path, tmp_dir)
+    converted_images = [str(p) for p in image_paths]
+
+    state["file_processing"] = _model_copy(fp, {"converted_images": converted_images})
     return state
 
 
 def vision_llm(state: AgentState) -> AgentState:
-    print("--- VISIONLLM START ---")
-    state["prev_action"] = "Preprocessing"
-    state["next_action"] = "Intent"
-
+    """
+    이미지 전처리 → Vision LLM 기반 구조화 OCR → ocr_blocks 저장.
+    """
+    print("--- VISIONLLM (OCR + CAPTION) ---")
+    tool_outputs = state.get("tool_outputs") or {}
     fp = _ensure_fp(state)
-
-    # 1. PDF 변환된 이미지들이 있으면 사용
-    images = fp.converted_images
-
-    # 2. 만약 PDF 변환이 없었는데(image_only) 단일 이미지 경로가 있다면 리스트로 변환
-    if not images and fp.file_type == "image" and fp.path:
-        images = [fp.path]
+    images = fp.converted_images or []
 
     if not images:
-        print("--- SKIP: NO IMAGES TO ANALYZE ---")
+        paths = _collect_input_paths(state, tool_outputs)
+        images = [p for p in paths if _infer_file_type(p) == "image"]
+
+    if not images:
         return state
 
-    provider_cfg = state.get("tool_outputs", {}).get("ocr_provider", {"name": "mock"})
+    tmp_dir_base = Path(tool_outputs.get("tmp_dir", "/tmp/lang_preprocess"))
+    prepared_images: List[str] = []
+    for img_ref in images:
+        local_img = _localize_input_path(img_ref, tmp_dir_base)
+        try:
+            proc_img = preprocessing_utils.preprocess_image(
+                local_img, local_img.with_suffix(".proc.png")
+            )
+            prepared_images.append(str(proc_img))
+        except Exception:
+            prepared_images.append(str(local_img))
+
+    if not prepared_images:
+        return state
+
+    provider_cfg = tool_outputs.get("ocr_provider") or {"name": "gemini"}
+    if not isinstance(provider_cfg, dict):
+        provider_cfg = {"name": str(provider_cfg)}
+    provider_name = str(provider_cfg.get("name", "")).lower()
+    if provider_name in {"mathpix", "tesseract"}:
+        provider_cfg = {**provider_cfg, "name": "gemini"}
 
     try:
-        ocr_result_dict = analyze_images(images, provider_cfg=provider_cfg)
-        state["file_processing"] = _model_copy(fp, {"ocr_text": ocr_result_dict})
+        ocr_result_dict = analyze_images(prepared_images, provider_cfg=provider_cfg)
+        state["file_processing"] = _model_copy(fp, {"ocr_blocks": ocr_result_dict})
     except Exception as e:
         print(f"--- VISION ERROR: {e} ---")
-
-    """이미지 분석 - OCR + 캡셔닝 (stub)."""
-    print("---PROCESSING WITH VISION LLM---")
-
     return state
 
 
-def route_by_check_type(
-    state: AgentState,
-) -> Literal["FileConvert", "VisionLLM", "__end__"]:
-    state["prev_action"] = "Preprocessing"
-    state["next_action"] = "Intent"
+def route_by_check_type(state: AgentState) -> Literal["FileConvert", "VisionLLM", "__end__"]:
+    """파일 형식에 따라 다음 단계를 결정합니다.
+
+    - mixed_files: PDF/PPT 등 변환이 필요한 파일이 포함된 경우 'FileConvert'로 갑니다.
+    - image_only: 이미지 파일만 있는 경우, 바로 'VisionLLM'으로 갑니다.
+    - text_only: 텍스트만 있는 경우, 전처리 과정 없이 바로 종료합니다.
+    """
     check_result = state.get("check_result", "text_only")
     if check_result == "mixed_files":
         return "FileConvert"
-    if check_result == "image_only":
+    elif check_result == "image_only":
         return "VisionLLM"
     return "__end__"
 
