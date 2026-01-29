@@ -258,6 +258,59 @@ async def message_generator(
     agent: AgentGraph = get_agent(agent_id)
     kwargs, run_id = await _handle_input(user_input, agent)
 
+    # 노드별 진행 상태 문구 매핑 (최종 응답 전까지 "~하고 있습니다" 형태로 전달)
+    progress_messages: dict[str, str] = {
+        "CheckType": "첨부된 파일 유형을 분석하고 있습니다.",
+        "FileConvert": "문서를 이미지로 변환하고 있습니다.",
+        "VisionLLM": "이미지에서 텍스트와 수식을 추출하고 있습니다.",
+        "Intent": "질문의 의도를 분석하고 있습니다.",
+        "Planner": "여러 단계의 학습 계획을 세우고 있습니다.",
+        "Executor": "계획된 단계를 실행할 준비를 하고 있습니다.",
+        "RetryCounter": "이전 시도가 충분했는지 확인하고 있습니다.",
+        "EmbeddingSearch": "관련 자료를 검색하고 있습니다.",
+        "RelevanceCheck": "검색된 자료의 관련성을 평가하고 있습니다.",
+        "RetrievedDocs": "검색된 자료를 컨텍스트에 주입하고 있습니다.",
+        "Solve_Analysis": "문제를 분석하고 필요한 정보를 정리하고 있습니다.",
+        "Solve_Strategy": "문제 풀이 전략과 코드를 생성하고 있습니다.",
+        "Solve_Computation": "문제에 대한 코드를 실행 중입니다.",
+        "Explain": "질문 내용을 쉽게 설명할 방법을 정리하고 있습니다.",
+        "CreateGraph": "문제 상황을 그래프로 시각화할 방법을 고민하고 있습니다.",
+        "Variant": "비슷한 유형의 변형 문제를 생성하고 있습니다.",
+        "Solution": "풀이 과정을 정리하고 있습니다.",
+        "Check": "답이 올바른지 검산하고 있습니다.",
+        "Review": "전체 풀이 결과를 자동으로 리뷰하고 있습니다.",
+        "Suggestion": "다음 학습 방향에 대한 제안을 준비하고 있습니다.",
+    }
+
+    def is_final_node(path: Any) -> bool:
+        """스트리밍 이벤트의 node_path가 FinalResponse 노드를 가리키는지 확인.
+
+        node_path의 실제 타입(tuple, list, NodePath, str 등)에 상관없이
+        문자열 표현 안에 "FinalResponse"가 포함되어 있으면 최종 응답 노드로 간주한다.
+        """
+        if path is None:
+            return False
+        try:
+            return "FinalResponse" in str(path)
+        except Exception:
+            return False
+
+    def emit_progress(node_name: str | None) -> None:
+        """비 최종 노드용 진행 상황 custom 메시지를 SSE로 전송."""
+        if not node_name:
+            return
+        text = progress_messages.get(node_name)
+        if not text:
+            return
+        progress = ChatMessage(
+            type="custom", content="", custom_data={"node": node_name, "status": text}
+        )  # type: ignore[call-arg]
+        progress.run_id = str(run_id)
+        yield_line = f"data: {json.dumps({'type': 'message', 'content': progress.model_dump()}, ensure_ascii=False)}\n\n"
+        # message_generator는 async generator이므로, 내부 헬퍼에서 직접 yield 할 수 없어
+        # 호출 측에서 이 문자열을 다시 yield 하도록 반환 값 대신 클로저 형태로 사용한다.
+        return yield_line  # type: ignore[return-value]
+
     try:
         # Process streamed events from the graph and yield messages over the SSE stream.
         async for stream_event in agent.astream(
@@ -266,9 +319,10 @@ async def message_generator(
             if not isinstance(stream_event, tuple):
                 continue
             # Handle different stream event structures based on subgraphs
+            node_path: Any | None = None
             if len(stream_event) == 3:
                 # With subgraphs=True: (node_path, stream_mode, event)
-                _, stream_mode, event = stream_event
+                node_path, stream_mode, event = stream_event
             else:
                 # Without subgraphs: (stream_mode, event)
                 stream_mode, event = stream_event
@@ -283,6 +337,14 @@ async def message_generator(
                         for interrupt in updates:
                             new_messages.append(AIMessage(content=interrupt.value))
                         continue
+
+                    # 비 최종 노드에 대해서는 진행 상황 custom 메시지만 보내고,
+                    # 중간 AI/Human 메시지는 클라이언트에 노출하지 않는다.
+                    node_name = str(node).split("/")[-1]
+                    progress_line = emit_progress(node_name)
+                    if progress_line is not None:
+                        yield progress_line  # type: ignore[misc]
+
                     updates = updates or {}
                     update_messages = updates.get("messages", [])
                     # special cases for using langgraph-supervisor library
@@ -297,7 +359,9 @@ async def message_generator(
                                 update_messages = [update_messages[-1]]
                         else:
                             update_messages = []
-                    new_messages.extend(update_messages)
+
+                    # 중간 노드의 update_messages는 클라이언트로 전달하지 않기 위해 버린다.
+                    # 최종 응답 노드의 update_messages도 토큰 스트림으로 충분하므로 별도 전송하지 않는다.
 
             if stream_mode == "custom":
                 new_messages = [event]
@@ -324,6 +388,7 @@ async def message_generator(
             if current_message:
                 processed_messages.append(_create_ai_message(current_message))
 
+            # updates/custom에서 생성된 processed_messages만 일반 message로 전송
             for message in processed_messages:
                 try:
                     chat_message = langchain_to_chat_message(message)
@@ -341,6 +406,9 @@ async def message_generator(
                 yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()}, ensure_ascii=False)}\n\n"
 
             if stream_mode == "messages":
+                # LangGraph가 LLM 토큰을 messages 스트림으로 전달해 줄 때,
+                # 여기서는 node_path에 관계없이 토큰을 그대로 클라이언트로 전달한다.
+                # (중간 노드에서의 불필요한 스트리밍은 그래프 쪽의 nostream 태그로 제어함)
                 if not user_input.stream_tokens:
                     continue
                 msg, metadata = event
