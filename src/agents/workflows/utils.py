@@ -148,9 +148,21 @@ def call_model(
     model_name: OpenRouterModelName,
     system_prompt: str,
     user_prompt: str,
+    *,
+    tags: list[str] | None = None,
 ):
-    """기본적인 system+human 프롬프트 패턴으로 OpenRouter 모델을 호출한다."""
-    model = get_model(model_name)
+    """기본적인 system+human 프롬프트 패턴으로 OpenRouter 모델을 호출한다.
+
+    기본값으로 `tags=["skip_stream"]`를 설정해, 이 유틸을 사용하는 대부분의 노드에서는
+    /stream 토큰 스트리밍 대상에서 제외되도록 한다. 토큰을 스트리밍해야 하는 노드는
+    tags=[] 또는 원하는 태그 목록을 명시적으로 전달한다.
+    """
+    if tags is None:
+        tags = ["skip_stream"]
+
+    base_model = get_model(model_name)
+    model = base_model.with_config(tags=tags) if tags else base_model
+
     ai_message = model.invoke(
         [
             SystemMessage(content=system_prompt),

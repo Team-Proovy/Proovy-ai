@@ -43,3 +43,4 @@ privatecredentials/*
 
 test.pdf
 outputs/
+src/service/parse_tokens.py
