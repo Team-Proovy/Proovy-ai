@@ -10,6 +10,7 @@ from langgraph.graph import END, StateGraph
 from agents.state import AgentState
 from core.llm import get_model
 from agents.workflows.review_logic import run_review, run_suggestion
+from agents.workflows.final_response import final_response
 from schema.models import OpenRouterModelName
 
 # 각 서브그래프들을 import 합니다.
@@ -116,7 +117,10 @@ def suggestion(state: AgentState) -> AgentState:
         print("run_suggestion error:", exc)
         patch = {
             "messages": [
-                {"role": "assistant", "content": "제안 생성 중 오류가 발생했습니다. 나중에 다시 시도해주세요."}
+                {
+                    "role": "assistant",
+                    "content": "제안 생성 중 오류가 발생했습니다. 나중에 다시 시도해주세요.",
+                }
             ],
             "final_output": {"suggestion_summary": "제안 생성 실패"},
         }
@@ -131,7 +135,9 @@ def suggestion(state: AgentState) -> AgentState:
     # Merge final_output dict
     if "final_output" in patch:
         cur_final = state.get("final_output") or {}
-        updated_final = dict(cur_final) if isinstance(cur_final, dict) else {"text": str(cur_final)}
+        updated_final = (
+            dict(cur_final) if isinstance(cur_final, dict) else {"text": str(cur_final)}
+        )
         pf = patch.pop("final_output")
         if isinstance(pf, dict):
             updated_final.update(pf)
@@ -194,7 +200,11 @@ def fallback(state: AgentState) -> AgentState:
     )
     state["messages"] = (state.get("messages") or []) + [message]
     final_output = state.get("final_output") or {}
-    updated_final = dict(final_output) if isinstance(final_output, dict) else {"text": str(final_output)}
+    updated_final = (
+        dict(final_output)
+        if isinstance(final_output, dict)
+        else {"text": str(final_output)}
+    )
     updated_final["fallback"] = {
         "reason": "retry_limit_exceeded",
         "retry_count": retry_count,
@@ -208,19 +218,21 @@ def fallback(state: AgentState) -> AgentState:
 builder = StateGraph(AgentState)
 
 # --- 노드 등록 ---
-# 1. 서브그래프 노드
-builder.add_node("Preprocessing", preprocessing_graph)
-builder.add_node("Router", router_graph)
-builder.add_node("RAG", rag_graph)
-# 2. Feature 서브그래프 노드들
+# 1. 서브그래프 노드 (내부 LLM 호출 시 스트림 방지)
+builder.add_node("Preprocessing", preprocessing_graph, tags=["nostream"])
+builder.add_node("Router", router_graph, tags=["nostream"])
+builder.add_node("RAG", rag_graph, tags=["nostream"])
+# 2. Feature 서브그래프 노드들 (내부 LLM 호출 시 스트림 방지)
 for name, graph_obj in FEATURE_MAP.items():
-    # name.capitalize()는 'CreateGraph' -> 'Creategraph'가 되므로, CamelCase는 그대로 써야 함
-    builder.add_node(name, graph_obj)
+    builder.add_node(name, graph_obj, tags=["nostream"])
 # 3. Main 그래프 자체 노드
-builder.add_node("Review", review)
-builder.add_node("Suggestion", suggestion)
+builder.add_node("Review", review, tags=["nostream"])
+builder.add_node("Suggestion", suggestion, tags=["nostream"])
 builder.add_node("Fallback", fallback)
-builder.add_node("Simple_response", simple_response)
+builder.add_node("Simple_response", simple_response, tags=["nostream"])
+# FinalResponse 노드는 LangGraph가 내부 LLM 호출을 감지하여
+# 자동으로 토큰을 스트리밍하도록 nostream 태그를 붙이지 않습니다.
+builder.add_node("FinalResponse", final_response)
 
 
 # --- 엣지 연결 ---
@@ -310,9 +322,10 @@ builder.add_conditional_edges(
 )
 
 # 8. 최종 응답 및 종료
-builder.add_edge("Suggestion", END)
-builder.add_edge("Fallback", END)
-builder.add_edge("Simple_response", END)
+builder.add_edge("Suggestion", "FinalResponse")
+builder.add_edge("Fallback", "FinalResponse")
+builder.add_edge("Simple_response", "FinalResponse")
+builder.add_edge("FinalResponse", END)
 
 
 # "agent": "src.agents.workflows.maingraph:graph"
