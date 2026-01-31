@@ -139,6 +139,7 @@ def check_type(state: AgentState) -> AgentState:
     fp = _ensure_fp(state)
     state["check_result"] = category
     state["file_processing"] = _model_copy(fp, {"file_type": inferred})
+    state["prev_action"] = "Preprocessing"
     return state
 
 
@@ -165,6 +166,7 @@ def file_convert(state: AgentState) -> AgentState:
     suffix = local_input.suffix.lower()
 
     if suffix != ".pdf":
+        state["prev_action"] = "Preprocessing"
         return state
     pdf_path = local_input
 
@@ -173,6 +175,7 @@ def file_convert(state: AgentState) -> AgentState:
     converted_images = [str(p) for p in image_paths]
 
     state["file_processing"] = _model_copy(fp, {"converted_images": converted_images})
+    state["prev_action"] = "Preprocessing"
     return state
 
 
@@ -190,6 +193,7 @@ def vision_llm(state: AgentState) -> AgentState:
         images = [p for p in paths if _infer_file_type(p) == "image"]
 
     if not images:
+        state["prev_action"] = "Preprocessing"
         return state
 
     tmp_dir_base = Path(tool_outputs.get("tmp_dir", "/tmp/lang_preprocess"))
@@ -205,6 +209,7 @@ def vision_llm(state: AgentState) -> AgentState:
             prepared_images.append(str(local_img))
 
     if not prepared_images:
+        state["prev_action"] = "Preprocessing"
         return state
 
     provider_cfg = tool_outputs.get("ocr_provider") or {"name": "gemini"}
@@ -219,6 +224,7 @@ def vision_llm(state: AgentState) -> AgentState:
         state["file_processing"] = _model_copy(fp, {"ocr_blocks": ocr_result_dict})
     except Exception as e:
         print(f"--- VISION ERROR: {e} ---")
+    state["prev_action"] = "Preprocessing"
     return state
 
 
