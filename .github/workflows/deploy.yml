@@ -2,7 +2,7 @@ name: AI CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "dev" ]
 
 jobs:
   build-and-deploy:
