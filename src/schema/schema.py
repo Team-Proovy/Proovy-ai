@@ -55,16 +55,19 @@ class UserInput(BaseModel):
         description="Thread ID to persist and continue a multi-turn conversation.",
         default=None,
         examples=["847c6285-8fc9-4560-a83f-4e6285809254"],
+        alias="threadId",
     )
     user_id: str | None = Field(
         description="User ID to persist and continue a conversation across multiple threads.",
         default=None,
         examples=["847c6285-8fc9-4560-a83f-4e6285809254"],
+        alias="userId",
     )
     agent_config: dict[str, Any] = Field(
         description="Additional configuration to pass through to the agent",
         default={},
         examples=[{"spicy_level": 0.8}],
+        alias="agentConfig",
     )
     files_url: list[str] | None = Field(
         description=(
@@ -74,6 +77,7 @@ class UserInput(BaseModel):
         ),
         default=None,
         examples=[["https://s3.amazonaws.com/your-bucket/test.pdf"]],
+        alias="filesUrl",
     )
     chosen_features: list[str] | None = Field(
         description=(
@@ -82,6 +86,7 @@ class UserInput(BaseModel):
         ),
         default=None,
         examples=[["Solve", "Explain"]],
+        alias="chosenFeatures",
     )
 
 
@@ -91,6 +96,7 @@ class StreamInput(UserInput):
     stream_tokens: bool = Field(
         description="Whether to stream LLM tokens to the client.",
         default=True,
+        alias="streamTokens",
     )
 
 
