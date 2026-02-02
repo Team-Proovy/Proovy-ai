@@ -113,7 +113,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise
 
 
-app = FastAPI(lifespan=lifespan, generate_unique_id_function=custom_generate_unique_id)
+app = FastAPI(
+    lifespan=lifespan,
+    generate_unique_id_function=custom_generate_unique_id,
+    root_path="/ai",
+)
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 
 
