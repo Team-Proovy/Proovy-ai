@@ -38,10 +38,11 @@ def _last_user_message(state: AgentState) -> str | None:
 
 
 def final_response(state: AgentState) -> AgentState:
-    """최종 한국어 응답을 생성하는 LangGraph 노드.
+    """최종 한국어 응답을 생성하는 LangGraph 노드 (하이브리드 방식).
 
-    - solve/explain/graph/variant/solution/check 등의 결과와
-      review_state, suggestion_summary 등을 참고하여 자연스러운 한국어 답을 만든다.
+    - partial_responses가 있으면: Writer 노드들이 생성한 부분 응답을 조합하고,
+      Suggestion만 추가로 생성하여 결합 (토큰 절약)
+    - partial_responses가 없으면: 기존 방식대로 전체 final_output을 LLM으로 종합
     - 생성된 답변은 state["messages"]에 AIMessage로 추가되고,
       state["final_output"]["final_answer"]에 문자열로 저장된다.
     - LangGraph가 내부 LLM 호출을 자동 감지하여 토큰을 스트리밍합니다.
@@ -52,48 +53,84 @@ def final_response(state: AgentState) -> AgentState:
     messages = state.get("messages") or []
     final_output = state.get("final_output") or {}
     review_state = state.get("review_state")
+    partial_responses = state.get("partial_responses", [])
 
-    # 최종 응답에 사용할 컨텍스트 구성
-    user_text = _last_user_message(state) or ""
+    # === 하이브리드 방식: partial_responses 우선 사용 ===
+    if partial_responses:
+        print(f"Using {len(partial_responses)} partial response(s) from Writer nodes")
 
-    # 너무 긴 JSON은 그대로 쓰되, 한국어 요약을 모델에 맡긴다.
-    serialized_final = json.dumps(final_output, ensure_ascii=False, default=str)
-    serialized_review = (
-        json.dumps(review_state, ensure_ascii=False, default=str)
-        if review_state is not None
-        else ""
-    )
+        # Writer 노드들이 생성한 부분들을 결합
+        feature_contents = []
+        for pr in partial_responses:
+            pr.get("feature", "Unknown")
+            content = pr.get("content", "")
+            if content:
+                feature_contents.append(content)
 
-    system_prompt = (
-        "너는 수학·과학·프로그래밍 문제를 도와주는 한국어 튜터야. "
-        "아래에 주어지는 사용자의 질문과 중간 계산/설명/리뷰 결과를 참고해서 "
-        "사용자가 이해하기 쉬운 최종 답변을 한국어로 작성해 줘. "
-        "너무 장황하지 않게 핵심 위주로 설명하고, 필요한 경우 2~4단계 정도의 "
-        "간단한 풀이 과정을 포함해 줘."
-    )
+        # 주요 응답 조합
+        main_response = "\n\n---\n\n".join(feature_contents)
 
-    # 모델에 건네줄 사용자 메시지
-    parts: list[str] = []
-    if user_text:
-        parts.append(f"[사용자 질문]\n{user_text}")
-    if serialized_final:
-        parts.append(f"[중간 결과 요약(final_output)]\n{serialized_final}")
-    if serialized_review:
-        parts.append(f"[리뷰/재시도 정보(review_state)]\n{serialized_review}")
+        # Suggestion이 있으면 추가
+        suggestion_summary = final_output.get("suggestion_summary")
+        suggestion_bullets = final_output.get("suggestion_bullets")
 
-    parts.append(
-        "위 정보를 종합해서, 사용자에게 보여줄 최종 한국어 답변을 작성해 줘. "
-        "답변은 친절하지만 불필요하게 길지 않게 하고, 수식이 있다면 LaTeX 형태로 간단히 표기해도 좋아."
-    )
+        if suggestion_bullets and isinstance(suggestion_bullets, list):
+            suggestion_text = "\n\n**다음 학습 제안:**\n"
+            suggestion_text += "\n".join(f"- {item}" for item in suggestion_bullets)
+            main_response += suggestion_text
+        elif suggestion_summary:
+            main_response += f"\n\n{suggestion_summary}"
 
-    user_prompt = "\n\n".join(parts)
+        answer_text = main_response.strip()
+        print(f"Final response from partial_responses (length: {len(answer_text)})")
 
-    # 공통 유틸리티 함수를 사용해 LLM을 호출한다.
-    # 기본 call_model은 tags=["skip_stream"]로 토큰 스트리밍을 건너뛰지만,
-    # 최종 응답 노드는 토큰을 스트리밍해야 하므로 tags=[]로 덮어쓴다.
-    answer_text = call_model(MODEL_NAME, system_prompt, user_prompt, tags=[]).strip()
+    else:
+        # === 기존 방식: 전체 final_output을 LLM으로 종합 ===
+        print("No partial_responses, using traditional full LLM synthesis")
+
+        user_text = _last_user_message(state) or ""
+        serialized_final = json.dumps(final_output, ensure_ascii=False, default=str)
+        serialized_review = (
+            json.dumps(review_state, ensure_ascii=False, default=str)
+            if review_state is not None
+            else ""
+        )
+
+        system_prompt = (
+            "너는 수학·과학·프로그래밍 문제를 도와주는 한국어 튜터야. "
+            "아래에 주어지는 사용자의 질문과 중간 계산/설명/리뷰 결과를 참고해서 "
+            "사용자가 이해하기 쉬운 최종 답변을 한국어로 작성해 줘. "
+            "너무 장황하지 않게 핵심 위주로 설명하고, 필요한 경우 2~4단계 정도의 "
+            "간단한 풀이 과정을 포함해 줘."
+        )
+
+        # 모델에 건네줄 사용자 메시지
+        parts: list[str] = []
+        if user_text:
+            parts.append(f"[사용자 질문]\n{user_text}")
+        if serialized_final:
+            parts.append(f"[중간 결과 요약(final_output)]\n{serialized_final}")
+        if serialized_review:
+            parts.append(f"[리뷰/재시도 정보(review_state)]\n{serialized_review}")
+
+        parts.append(
+            "위 정보를 종합해서, 사용자에게 보여줄 최종 한국어 답변을 작성해 줘. "
+            "답변은 친절하지만 불필요하게 길지 않게 하고, 수식이 있다면 LaTeX 형태로 간단히 표기해도 좋아."
+        )
+
+        user_prompt = "\n\n".join(parts)
+
+        # 공통 유틸리티 함수를 사용해 LLM을 호출한다.
+        # 기본 call_model은 tags=["skip_stream"]로 토큰 스트리밍을 건너뛰지만,
+        # 최종 응답 노드는 토큰을 스트리밍해야 하므로 tags=[]로 덮어쓴다.
+        answer_text = call_model(
+            MODEL_NAME, system_prompt, user_prompt, tags=[]
+        ).strip()
+        print("Final response (traditional): ", answer_text)
+
+    # === AIMessage 생성 및 state 업데이트 ===
     ai_msg = AIMessage(content=answer_text)
-    print("Final response : ", answer_text)
+
     # LangGraph state에 AIMessage 추가
     if not isinstance(ai_msg, AIMessage):
         content = getattr(ai_msg, "content", "")

@@ -76,9 +76,101 @@ Task: Analyze only the first explicit STEM problem you can find and respond in E
     )
     solve_result.analysis = analysis
     solve_result.problem = analysis.problem_statement
+
+    # 난이도 판단: 코드 실행이 필요한지 LLM에게 물어봄
+    difficulty_prompt = f"""
+Problem: {problem_statement}
+Domain: {analysis.domain}
+
+Task: Determine if this problem requires computational code execution or can be solved with simple reasoning.
+
+Return JSON with:
+- is_easy: true if it's a simple problem solvable with basic arithmetic or straightforward algebra
+- is_easy: false if it needs numerical computation, complex calculations, or symbolic manipulation with code
+- reason: brief explanation in English
+
+Examples:
+- "2x + 5 = 15" → is_easy: true (simple algebra)
+- "Calculate integral of x^2 from 0 to 10" → is_easy: false (needs numerical integration)
+- "What is 15% of 200?" → is_easy: true (basic arithmetic)
+- "Solve system of 3 equations with 3 unknowns" → is_easy: false (complex calculation)
+""".strip()
+
+    difficulty_system = (
+        "You are a difficulty assessor for STEM problems. "
+        "Determine if code execution is needed. Return only valid JSON."
+    )
+
+    difficulty_raw = call_model(
+        OpenRouterModelName.GPT_5_MINI,
+        difficulty_system,
+        difficulty_prompt,
+    )
+    difficulty_payload = safe_json_loads(difficulty_raw)
+    is_easy = difficulty_payload.get("is_easy", False)  # 기본값은 false (안전)
+
+    # state에 난이도 정보 저장
+    tool_outputs = state.setdefault("tool_outputs", {})
+    tool_outputs["is_easy_problem"] = is_easy
+    tool_outputs["difficulty_reason"] = difficulty_payload.get("reason", "")
+
+    # 쉬운 문제면 바로 LLM으로 풀이
+    if is_easy:
+        print("→ Easy problem detected: solving directly without code")
+        easy_solve_prompt = f"""
+Here is the problem analysis:
+{json.dumps(analysis.model_dump(), ensure_ascii=False, indent=2)}
+
+Task: This is a simple problem that doesn't require code execution.
+Solve it step-by-step and provide the final answer in Korean.
+
+Return JSON with:
+- answer: the final answer (concise, in Korean)
+- steps: array of 2-5 solution steps (in Korean)
+- latex: optional LaTeX expression for the final answer
+- summary: brief explanation (in Korean)
+""".strip()
+
+        easy_system = (
+            "You are a STEM tutor solving simple problems without code. "
+            "Provide clear step-by-step solutions in Korean. Return valid JSON."
+        )
+
+        easy_raw = call_model(
+            OpenRouterModelName.GPT_5_MINI,
+            easy_system,
+            easy_solve_prompt,
+        )
+
+        easy_payload = safe_json_loads(easy_raw)
+
+        solve_result.answer = str(
+            easy_payload.get("answer") or "답을 정리할 수 없습니다."
+        ).strip()
+        solve_result.steps = ensure_str_list(easy_payload.get("steps"))
+        latex_value = str(easy_payload.get("latex") or "").strip()
+        solve_result.latex = latex_value or solve_result.latex
+
+        final_summary = str(easy_payload.get("summary") or solve_result.answer).strip()
+
+        # final_output에 저장 (strategy, computation은 None)
+        analysis_dump = solve_result.analysis.model_dump()
+        final_output = state.setdefault("final_output", {})
+        final_output["solve"] = {
+            "analysis": analysis_dump,
+            "strategy": None,  # 코드 실행 안 함
+            "computation": None,  # 코드 실행 안 함
+            "answer": solve_result.answer,
+            "steps": solve_result.steps,
+            "latex": solve_result.latex,
+            "summary": final_summary,
+            "easy_mode": True,  # 간단한 문제 표시
+        }
+        state["final_output"] = final_output
+
+    state["tool_outputs"] = tool_outputs
     state["solve_result"] = solve_result
     state["prev_action"] = "Solve_Analysis"
-    state["next_action"] = "Solve_Strategy"
     return state
 
 
@@ -234,13 +326,122 @@ def execute_strategy(state: AgentState) -> AgentState:
     return state
 
 
+def solve_writer(state: AgentState) -> AgentState:
+    """Solve 결과를 즉시 사용자 친화적인 한국어 텍스트로 변환하는 Writer 노드.
+
+    이미 생성된 구조화 결과(answer, steps, latex)를 경량 LLM으로 포맷팅하여
+    토큰 스트리밍이 가능하도록 합니다. (LangGraph가 자동 감지)
+    """
+    print("---FEATURE: SOLVE / WRITER---")
+    solve_result = _ensure_solve_result(state)
+
+    # 기존 결과를 JSON으로 직렬화
+    retry_count = state.get("retry_count", 0) or 0
+
+    # LLM에게 주어지는 구조화 데이터
+    solve_data = {
+        "answer": solve_result.answer or "답이 없습니다",
+        "steps": solve_result.steps or [],
+        "latex": solve_result.latex or "",
+        "retry_count": retry_count,
+        "computation_success": solve_result.computation.success
+        if solve_result.computation
+        else True,
+        "computation_errors": solve_result.computation.stderr[:3]
+        if solve_result.computation and not solve_result.computation.success
+        else [],
+    }
+
+    serialized_data = json.dumps(solve_data, ensure_ascii=False, indent=2)
+
+    # 경량 LLM으로 포맷팅 (토큰 스트리밍 가능)
+    system_prompt = (
+        "너는 수학 문제 풀이 결과를 한국어로 정리하는 전문가야. "
+        "아래 JSON 데이터를 보고 사용자가 읽기 좋게 Markdown 형식으로 변환해 줘. "
+        "다음 규칙을 따라:\n"
+        "1. retry_count > 0이면 '다시 계산해본 결과입니다' 문구 추가\n"
+        "2. answer는 '**답:** {answer}' 형식\n"
+        "3. steps가 있으면 '**풀이 과정:**' + 번호 리스트\n"
+        "4. latex가 있으르면 '**수식:** ${latex}$' 형식\n"
+        "5. computation_success가 false면 '⚠️ 계산 중 오류...' + 에러 3줄\n"
+        "불필요한 설명 없이 간결하게 작성하고, 주어진 데이터만 사용해."
+    )
+
+    user_prompt = f"다음 데이터를 포맷팅해 주세요:\n\n{serialized_data}"
+
+    # LLM 호출 (토큰 스트리밍 가능, tags=[] 명시)
+    formatted_content = call_model(
+        OpenRouterModelName.GPT_5_MINI,
+        system_prompt,
+        user_prompt,
+        tags=[],  # 스트리밍 허용
+    ).strip()
+
+    # partial_responses에 누적 (FinalResponse가 활용)
+    partial_responses = state.get("partial_responses", [])
+    if partial_responses is None:
+        partial_responses = []
+
+    partial_responses.append(
+        {
+            "feature": "Solve",
+            "content": formatted_content,
+            "has_answer": bool(solve_result.answer),
+            "retry_count": retry_count,
+        }
+    )
+    state["partial_responses"] = partial_responses
+
+    # AIMessage는 call_model이 자동으로 생성해주므로 직접 추가 불필요
+    # (call_model 내부에서 LLM 호출 시 LangGraph가 AIMessage 자동 추가)
+
+    state["prev_action"] = "Solve_Writer"
+
+    return state
+
+
+def route_after_analysis(state: AgentState) -> str:
+    """Analysis 후 난이도에 따라 다음 노드 결정.
+
+    - is_easy=True: 간단한 문제 → 바로 Solve_Writer
+    - is_easy=False: 복잡한 문제 → Solve_Strategy
+    """
+    tool_outputs = state.get("tool_outputs") or {}
+    is_easy = tool_outputs.get("is_easy_problem", False)
+
+    if is_easy:
+        print("→ Easy problem: skipping to Solve_Writer")
+        return "Solve_Writer"
+    else:
+        print("→ Complex problem: going to Solve_Strategy")
+        return "Solve_Strategy"
+
+
 builder = StateGraph(AgentState)
-builder.add_node("Solve_Analysis", analyze_problem)
-builder.add_node("Solve_Strategy", plan_solution_strategy)
-builder.add_node("Solve_Computation", execute_strategy)
+# 중간 분석/전략/계산 노드는 스트리밍 차단 (skip_stream)
+builder.add_node("Solve_Analysis", analyze_problem, tags=["skip_stream"])
+builder.add_node("Solve_Strategy", plan_solution_strategy, tags=["skip_stream"])
+builder.add_node("Solve_Computation", execute_strategy, tags=["skip_stream"])
+# Writer 노드는 스트리밍 허용 (태그 없음)
+builder.add_node("Solve_Writer", solve_writer)
+
 builder.set_entry_point("Solve_Analysis")
-builder.add_edge("Solve_Analysis", "Solve_Strategy")
+
+# Analysis 후 난이도에 따라 분기
+builder.add_conditional_edges(
+    "Solve_Analysis",
+    route_after_analysis,
+    {
+        "Solve_Writer": "Solve_Writer",  # 쉬운 문제 → 바로 Writer
+        "Solve_Strategy": "Solve_Strategy",  # 복잡한 문제 → Strategy
+    },
+)
+
+# Complex path: Solve_Strategy → Solve_Computation → Solve_Writer
 builder.add_edge("Solve_Strategy", "Solve_Computation")
-builder.add_edge("Solve_Computation", END)
+builder.add_edge("Solve_Computation", "Solve_Writer")
+
+# Writer는 항상 END로
+builder.add_edge("Solve_Writer", END)
 
 graph = builder.compile()

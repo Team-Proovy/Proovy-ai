@@ -222,14 +222,16 @@ builder = StateGraph(AgentState)
 builder.add_node("Preprocessing", preprocessing_graph, tags=["nostream"])
 builder.add_node("Router", router_graph, tags=["nostream"])
 builder.add_node("RAG", rag_graph, tags=["nostream"])
-# 2. Feature 서브그래프 노드들 (내부 LLM 호출 시 스트림 방지)
+# 2. Feature 서브그래프 노드들
+# 내부 Writer 노드가 스트리밍할 수 있도록 nostream 태그를 붙이지 않습니다.
+# 대신 각 서브그래프 내부에서 노드별로 skip_stream 태그를 설정합니다.
 for name, graph_obj in FEATURE_MAP.items():
-    builder.add_node(name, graph_obj, tags=["nostream"])
+    builder.add_node(name, graph_obj)
 # 3. Main 그래프 자체 노드
 builder.add_node("Review", review, tags=["nostream"])
 builder.add_node("Suggestion", suggestion, tags=["nostream"])
 builder.add_node("Fallback", fallback)
-builder.add_node("Simple_response", simple_response, tags=["nostream"])
+builder.add_node("Simple_response", simple_response)
 # FinalResponse 노드는 LangGraph가 내부 LLM 호출을 감지하여
 # 자동으로 토큰을 스트리밍하도록 nostream 태그를 붙이지 않습니다.
 builder.add_node("FinalResponse", final_response)

@@ -123,6 +123,7 @@ def _is_complex_intent(question: str) -> bool:
     if not question:
         return False
     classifier = get_model(OpenRouterModelName.GPT_5_MINI)
+    classifier = classifier.with_config(tags=["skip_stream"])
     system_prompt = (
         "You are an intent assessor. "
         "Return 'MULTI' if the request needs multiple distinct reasoning steps "
@@ -159,6 +160,7 @@ def _infer_primary_feature(question: str) -> Optional[str]:
     )
     human_prompt = f"Question:\n{question}\n\nReturn only the chosen feature name."
     model = get_model(OpenRouterModelName.GPT_5_MINI)
+    model = model.with_config(tags=["skip_stream"])
     try:
         resp = model.invoke(
             [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
@@ -197,6 +199,7 @@ def _generate_plan_with_model(
     )
 
     model = get_model(OpenRouterModelName.GPT_5_1_CODEX_MINI)
+    model = model.with_config(tags=["skip_stream"])
     try:
         ai_message = model.invoke(
             [
@@ -240,6 +243,7 @@ def intent(state: AgentState) -> AgentState:
 
     if combined_question:
         classifier = get_model(OpenRouterModelName.GPT_5_MINI)
+        classifier = classifier.with_config(tags=["skip_stream"])
         system_prompt = (
             "You are a strict classifier. "
             "Return only 'STEM' if the user's question is about math, physics, "
