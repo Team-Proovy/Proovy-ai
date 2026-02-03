@@ -72,7 +72,27 @@ class VariantResult(BaseModel):
 
 
 class SolutionResult(BaseModel):
-    guide: str
+    guide: str = ""
+    chunk_index: int = 0
+    chunk_size: int = 0
+    total_problems: int = 0
+    total_chunks: int = 0
+    problems: List[str] = Field(default_factory=list)
+    explanations: List[str] = Field(default_factory=list)
+    chunk_summary: Optional[str] = None
+    pdf_path: Optional[str] = None
+    pdf_file_name: Optional[str] = None
+    pdf_mime_type: Optional[str] = None
+    pdf_file_size: Optional[int] = None
+    pdf_error: Optional[str] = None
+
+
+class SolutionProgress(BaseModel):
+    chunk_size: int = 5
+    current_chunk: int = 0
+    total_problems: int = 0
+    total_chunks: int = 0
+    done: bool = False
 
 
 class ReviewState(BaseModel):
@@ -122,3 +142,6 @@ class AgentState(TypedDict):
     tool_outputs: NotRequired[Dict[str, Any]]
     final_output: NotRequired[Dict[str, Any]]
     chosen_features: NotRequired[List[str]]
+    solution_chunks: NotRequired[List[str]]
+    solution_progress: NotRequired[SolutionProgress]
+    solution_pdf: NotRequired[Dict[str, Any]]

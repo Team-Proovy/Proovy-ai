@@ -2,8 +2,8 @@ from typing import Dict, Any, List, Optional
 import json
 import re
 
-from langchain_core.messages import AIMessage, HumanMessage
-from agents.workflows.utils import call_model
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from core.llm import get_model
 from core.settings import settings
 from schema.models import OpenRouterModelName
 
@@ -24,11 +24,7 @@ def _ensure_dict_review_state(review_state) -> Dict[str, Any]:
     if isinstance(review_state, dict):
         return dict(review_state)
     try:
-        return (
-            review_state.model_dump()
-            if hasattr(review_state, "model_dump")
-            else review_state.dict()
-        )
+        return review_state.model_dump() if hasattr(review_state, "model_dump") else review_state.dict()
     except Exception:
         return {
             "passed": getattr(review_state, "passed", True),
@@ -41,13 +37,36 @@ def _ensure_dict_review_state(review_state) -> Dict[str, Any]:
 
 def _serialize_model_obj(obj):
     try:
-        return (
-            obj.model_dump(exclude_none=True)
-            if hasattr(obj, "model_dump")
-            else obj.dict(exclude_none=True)
-        )
+        return obj.model_dump(exclude_none=True) if hasattr(obj, "model_dump") else obj.dict(exclude_none=True)
     except Exception:
         return str(obj)
+
+
+def _solution_next_suggestions(state: Dict[str, Any]) -> List[str]:
+    progress = state.get("solution_progress")
+    if isinstance(progress, dict):
+        current = int(progress.get("current_chunk", 0) or 0)
+        total = int(progress.get("total_chunks", 0) or 0)
+        chunk_size = int(progress.get("chunk_size", 0) or 0)
+        total_problems = int(progress.get("total_problems", 0) or 0)
+    else:
+        current = getattr(progress, "current_chunk", 0) if progress else 0
+        total = getattr(progress, "total_chunks", 0) if progress else 0
+        chunk_size = getattr(progress, "chunk_size", 0) if progress else 0
+        total_problems = getattr(progress, "total_problems", 0) if progress else 0
+    if total and current < total:
+        remaining = max(0, int(total_problems or 0) - (int(current or 0) * int(chunk_size or 0)))
+        next_batch = min(int(chunk_size or 0) or 5, remaining) if remaining else (int(chunk_size or 0) or 5)
+        return [f"다음 {next_batch}문제도 풀어드릴까요?", "전체 요약본이 필요하신가요?"]
+
+    final_output = state.get("final_output") or {}
+    solution_view = final_output.get("solution") if isinstance(final_output, dict) else None
+    if isinstance(solution_view, dict) and solution_view.get("next_chunk_available"):
+        remaining = int(solution_view.get("remaining_count") or 0)
+        chunk_size = int(solution_view.get("chunk_size") or 0) or 5
+        next_batch = min(chunk_size, remaining) if remaining else chunk_size
+        return [f"다음 {next_batch}문제도 풀어드릴까요?", "전체 요약본이 필요하신가요?"]
+    return []
 
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
@@ -85,49 +104,30 @@ def is_all_empty(feature_view: Dict[str, Any]) -> bool:
 def rule_checks(feature_view: Dict[str, Any]) -> List[str]:
     reasons = []
 
+
     if is_all_empty(feature_view):
         reasons.append("no_step_result")
         return reasons
 
     solve = feature_view.get("solve_result")
     if solve:
-        ans = (
-            solve.answer
-            if hasattr(solve, "answer")
-            else (solve.get("answer") if isinstance(solve, dict) else None)
-        )
+        ans = solve.answer if hasattr(solve, "answer") else (solve.get("answer") if isinstance(solve, dict) else None)
         if not ans:
             reasons.append("empty_answer")
 
-        comp = (
-            solve.computation
-            if hasattr(solve, "computation")
-            else (solve.get("computation") if isinstance(solve, dict) else None)
-        )
+        comp = solve.computation if hasattr(solve, "computation") else (solve.get("computation") if isinstance(solve, dict) else None)
         if comp:
-            success = (
-                getattr(comp, "success", None)
-                if not isinstance(comp, dict)
-                else comp.get("success")
-            )
+            success = getattr(comp, "success", None) if not isinstance(comp, dict) else comp.get("success")
             if success is False:
                 reasons.append("computation_failed")
 
-        steps = (
-            solve.steps
-            if hasattr(solve, "steps")
-            else (solve.get("steps") if isinstance(solve, dict) else [])
-        )
+        steps = solve.steps if hasattr(solve, "steps") else (solve.get("steps") if isinstance(solve, dict) else [])
         if not steps:
             reasons.append("no_steps")
     else:
         explain = feature_view.get("explain_result")
         if explain:
-            expl_text = (
-                getattr(explain, "explanation", "")
-                if not isinstance(explain, dict)
-                else explain.get("explanation", "")
-            )
+            expl_text = getattr(explain, "explanation", "") if not isinstance(explain, dict) else explain.get("explanation", "")
             if len(str(expl_text).strip()) < 20:
                 reasons.append("brief_explanation")
     return reasons
@@ -159,28 +159,30 @@ def run_review(state: Dict[str, Any]) -> Dict[str, Any]:
         review_out["reasons"] = reasons
 
         last_user_msg = _last_user_message(state.get("messages") or [])
-        feature_summary = {
-            k: (None if v is None else _serialize_model_obj(v))
-            for k, v in feature_view.items()
-        }
+        feature_summary = {k: (None if v is None else _serialize_model_obj(v)) for k, v in feature_view.items()}
 
-        # 모델 호출 로그 찍어보기기
-
+        #모델 호출 로그 찍어보기기
         print(
             f"---REVIEW: MODEL={MODEL_NAME} openrouter_key_set={bool(settings.OPENROUTER_API_KEY)}---"
         )
-
-        user_prompt = (
-            f"Detected deterministic issues: {reasons}\n"
-            f"Last user message: {last_user_msg}\n"
-            f"Feature summary: {json.dumps(feature_summary, ensure_ascii=False, default=str)}\n"
-            f"Please return JSON with keys feedback (short) and suggestions (list)."
-        )
+        model = get_model(MODEL_NAME)
+        prompt = [
+            SystemMessage(content=REVIEW_SYSTEM_PROMPT),
+            HumanMessage(
+                content=(
+                    f"Detected deterministic issues: {reasons}\n"
+                    f"Last user message: {last_user_msg}\n"
+                    f"Feature summary: {json.dumps(feature_summary, ensure_ascii=False, default=str)}\n"
+                    f"Please return JSON with keys feedback (short) and suggestions (list)."
+                )
+            ),
+        ]
 
         parsed = None
         text = ""
         try:
-            text = call_model(MODEL_NAME, REVIEW_SYSTEM_PROMPT, user_prompt)
+            ai_msg = model.invoke(prompt)
+            text = getattr(ai_msg, "content", "") or str(ai_msg)
             parsed = _extract_json(text)
         except Exception:
             parsed = None
@@ -189,9 +191,7 @@ def run_review(state: Dict[str, Any]) -> Dict[str, Any]:
             review_out["feedback"] = parsed.get("feedback", review_out["feedback"])
             review_out["suggestions"] = parsed.get("suggestions", [])
         else:
-            review_out["feedback"] = (
-                text[:1000] if text else "Review evaluation failed."
-            )
+            review_out["feedback"] = text[:1000] if text else "Review evaluation failed."
             review_out["suggestions"] = []
 
         review_out["retry_count"] = retry_count
@@ -203,35 +203,48 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
     print(
         f"---SUGGESTION: MODEL={MODEL_NAME} openrouter_key_set={bool(settings.OPENROUTER_API_KEY)}---"
     )
+    model = get_model(MODEL_NAME)
     review_state = _ensure_dict_review_state(state.get("review_state"))
     last_user_msg = _last_user_message(state.get("messages") or [])
 
     feature_summary = {}
-    for key in ("solve_result", "explain_result", "graph_result"):
+    for key in ("solve_result", "explain_result", "graph_result", "solution_result"):
         value = state.get(key)
         feature_summary[key] = None if value is None else _serialize_model_obj(value)
 
-    user_prompt = (
-        f"Review: {json.dumps(review_state, ensure_ascii=False)}\n"
-        f"Last user message: {last_user_msg}\n"
-        f"Feature summary: {json.dumps(feature_summary, ensure_ascii=False, default=str)}\n"
-        f"Return JSON with keys: ai_message, summary, suggestion_bullets."
-    )
+    prompt = [
+        SystemMessage(content=SUGGESTION_SYSTEM_PROMPT),
+        HumanMessage(
+            content=(
+                f"Review: {json.dumps(review_state, ensure_ascii=False)}\n"
+                f"Last user message: {last_user_msg}\n"
+                f"Feature summary: {json.dumps(feature_summary, ensure_ascii=False, default=str)}\n"
+                f"Return JSON with keys: ai_message, summary, suggestion_bullets."
+            )
+        ),
+    ]
 
     parsed = None
     text = ""
     try:
-        text = call_model(MODEL_NAME, SUGGESTION_SYSTEM_PROMPT, user_prompt)
+        ai_msg = model.invoke(prompt)
+        text = getattr(ai_msg, "content", "") or str(ai_msg)
         parsed = _extract_json(text)
     except Exception:
         parsed = None
 
     suggestion_json = parsed or {}
     suggestion_bullets = suggestion_json.get("suggestion_bullets", [])
-    ai_message_text = suggestion_json.get(
-        "ai_message", text or "다음 학습 방향을 제안합니다."
-    )
+    ai_message_text = suggestion_json.get("ai_message", text or "다음 학습 방향을 제안합니다.")
     summary = suggestion_json.get("summary", suggestion_bullets)
+
+    extra_suggestions = _solution_next_suggestions(state)
+    if extra_suggestions:
+        if not isinstance(suggestion_bullets, list):
+            suggestion_bullets = []
+        for item in extra_suggestions:
+            if item not in suggestion_bullets:
+                suggestion_bullets.append(item)
 
     if suggestion_bullets and ai_message_text:
         bullet_lines = "\n".join(f"- {item}" for item in suggestion_bullets)
@@ -246,11 +259,7 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
         ai_message_obj = {"role": "assistant", "content": ai_message_text}
 
     current_final = state.get("final_output") or {}
-    updated_final = (
-        dict(current_final)
-        if isinstance(current_final, dict)
-        else {"text": str(current_final)}
-    )
+    updated_final = dict(current_final) if isinstance(current_final, dict) else {"text": str(current_final)}
     # 성공 케이스에서도 review를 항상 포함하도록 보장
     if "review" not in updated_final:
         updated_final["review"] = review_state
@@ -259,3 +268,4 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
         updated_final["suggestion_bullets"] = suggestion_bullets
 
     return {"messages": [ai_message_obj], "final_output": updated_final}
+

@@ -48,6 +48,37 @@ FEATURE_ALIAS_MAP = {
     "verify": "Check",
 }
 
+SOLUTION_KEYWORDS = (
+    "해설지",
+    "해설지 생성",
+    "해설지 생성하기",
+    "해설지 pdf",
+    "pdf로 생성",
+    "pdf로 만들어",
+    "pdf로 만들어줘",
+    "pdf로 저장",
+    "pdf로 저장해",
+    "pdf로 저장해줘",
+)
+SOLVE_KEYWORDS = ("해설해줘", "풀이해줘", "설명해줘", "풀어줘")
+
+
+def _has_solution_intent(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    has_explicit = any(keyword.lower() in lowered for keyword in SOLUTION_KEYWORDS)
+    if _has_solve_intent(text) and not has_explicit:
+        return False
+    return has_explicit
+
+
+def _has_solve_intent(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(keyword.lower() in lowered for keyword in SOLVE_KEYWORDS)
+
 
 def _normalize_feature_name(raw: Optional[str]) -> Optional[str]:
     if not raw:
@@ -117,6 +148,10 @@ def _is_complex_intent(question: str) -> bool:
 def _infer_primary_feature(question: str) -> Optional[str]:
     if not question:
         return None
+    if _has_solution_intent(question):
+        return "Solution"
+    if _has_solve_intent(question):
+        return "Solve"
     allowed = ", ".join(sorted(FEATURE_ACTIONS))
     system_prompt = (
         "You map a math-related request to the most suitable feature. "
@@ -197,6 +232,11 @@ def intent(state: AgentState) -> AgentState:
     """
     print("---ROUTER: INTENT DETECTION---")
     latest_question, ocr_full_text, combined_question = _collect_user_context(state)
+    chosen = _extract_chosen_features(state)
+    if "Solution" in chosen or _has_solution_intent(combined_question):
+        state["simple_response"] = False
+        state["prev_action"] = "Intent"
+        return state
 
     if combined_question:
         classifier = get_model(OpenRouterModelName.GPT_5_MINI)
@@ -255,6 +295,12 @@ def intent_route(state: AgentState) -> Literal["Planner", "Executor"]:
         return "Planner"
 
     _, _, combined_question = _collect_user_context(state)
+    if _has_solution_intent(combined_question):
+        state["plan"] = ["Solution"]
+        return "Executor"
+    if _has_solve_intent(combined_question):
+        state["plan"] = ["Solve"]
+        return "Executor"
     requires_planner = _is_complex_intent(combined_question)
     if requires_planner:
         return "Planner"

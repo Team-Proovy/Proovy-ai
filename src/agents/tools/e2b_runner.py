@@ -9,6 +9,23 @@ from e2b_code_interpreter.models import Execution
 
 from core.settings import settings
 
+_SANDBOX: Sandbox | None = None
+_SANDBOX_LOCK = None
+
+
+def _get_sandbox(api_key: str, *, reuse: bool) -> Sandbox:
+    global _SANDBOX, _SANDBOX_LOCK
+    if not reuse:
+        return Sandbox.create(api_key=api_key)
+    if _SANDBOX_LOCK is None:
+        import threading
+
+        _SANDBOX_LOCK = threading.Lock()
+    with _SANDBOX_LOCK:
+        if _SANDBOX is None:
+            _SANDBOX = Sandbox.create(api_key=api_key)
+        return _SANDBOX
+
 
 class E2BExecutionError(RuntimeError):
     """Raised when sandbox initialization or execution fails."""
@@ -48,6 +65,7 @@ def run_python_with_e2b(
     envs: Optional[dict[str, str]] = None,
     timeout: Optional[float] = 60.0,
     request_timeout: Optional[float] = None,
+    reuse_sandbox: bool = True,
 ) -> E2BExecutionResult:
     """Execute Python code inside an E2B sandbox and return stdout/stderr."""
 
@@ -57,14 +75,14 @@ def run_python_with_e2b(
     api_key = _resolve_api_key()
 
     try:
-        with Sandbox.create(api_key=api_key) as sandbox:
-            execution = sandbox.run_code(
-                code,
-                language="python",
-                envs=envs,
-                timeout=timeout,
-                request_timeout=request_timeout,
-            )
+        sandbox = _get_sandbox(api_key, reuse=reuse_sandbox)
+        execution = sandbox.run_code(
+            code,
+            language="python",
+            envs=envs,
+            timeout=timeout,
+            request_timeout=request_timeout,
+        )
     except Exception as exc:
         raise E2BExecutionError("Failed to execute code inside E2B sandbox.") from exc
 
