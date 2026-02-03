@@ -234,13 +234,91 @@ def execute_strategy(state: AgentState) -> AgentState:
     return state
 
 
+def solve_writer(state: AgentState) -> AgentState:
+    """Solve 결과를 즉시 사용자 친화적인 한국어 텍스트로 변환하는 Writer 노드.
+
+    이미 생성된 구조화 결과(answer, steps, latex)를 경량 LLM으로 포맷팅하여
+    토큰 스트리밍이 가능하도록 합니다. (LangGraph가 자동 감지)
+    """
+    print("---FEATURE: SOLVE / WRITER---")
+    solve_result = _ensure_solve_result(state)
+
+    # 기존 결과를 JSON으로 직렬화
+    retry_count = state.get("retry_count", 0) or 0
+
+    # LLM에게 주어지는 구조화 데이터
+    solve_data = {
+        "answer": solve_result.answer or "답이 없습니다",
+        "steps": solve_result.steps or [],
+        "latex": solve_result.latex or "",
+        "retry_count": retry_count,
+        "computation_success": solve_result.computation.success
+        if solve_result.computation
+        else True,
+        "computation_errors": solve_result.computation.stderr[:3]
+        if solve_result.computation and not solve_result.computation.success
+        else [],
+    }
+
+    serialized_data = json.dumps(solve_data, ensure_ascii=False, indent=2)
+
+    # 경량 LLM으로 포맷팅 (토큰 스트리밍 가능)
+    system_prompt = (
+        "너는 수학 문제 풀이 결과를 한국어로 정리하는 전문가야. "
+        "아래 JSON 데이터를 보고 사용자가 읽기 좋게 Markdown 형식으로 변환해 줘. "
+        "다음 규칙을 따라:\n"
+        "1. retry_count > 0이면 '다시 계산해본 결과입니다' 문구 추가\n"
+        "2. answer는 '**답:** {answer}' 형식\n"
+        "3. steps가 있으면 '**풀이 과정:**' + 번호 리스트\n"
+        "4. latex가 있으르면 '**수식:** ${latex}$' 형식\n"
+        "5. computation_success가 false면 '⚠️ 계산 중 오류...' + 에러 3줄\n"
+        "불필요한 설명 없이 간결하게 작성하고, 주어진 데이터만 사용해."
+    )
+
+    user_prompt = f"다음 데이터를 포맷팅해 주세요:\n\n{serialized_data}"
+
+    # LLM 호출 (토큰 스트리밍 가능, tags=[] 명시)
+    formatted_content = call_model(
+        OpenRouterModelName.GPT_5_MINI,
+        system_prompt,
+        user_prompt,
+        tags=[],  # 스트리밍 허용
+    ).strip()
+
+    # partial_responses에 누적 (FinalResponse가 활용)
+    partial_responses = state.get("partial_responses", [])
+    if partial_responses is None:
+        partial_responses = []
+
+    partial_responses.append(
+        {
+            "feature": "Solve",
+            "content": formatted_content,
+            "has_answer": bool(solve_result.answer),
+            "retry_count": retry_count,
+        }
+    )
+    state["partial_responses"] = partial_responses
+
+    # AIMessage는 call_model이 자동으로 생성해주므로 직접 추가 불필요
+    # (call_model 내부에서 LLM 호출 시 LangGraph가 AIMessage 자동 추가)
+
+    state["prev_action"] = "Solve_Writer"
+
+    return state
+
+
 builder = StateGraph(AgentState)
-builder.add_node("Solve_Analysis", analyze_problem)
-builder.add_node("Solve_Strategy", plan_solution_strategy)
-builder.add_node("Solve_Computation", execute_strategy)
+# 중간 분석/전략/계산 노드는 스트리밍 차단 (skip_stream)
+builder.add_node("Solve_Analysis", analyze_problem, tags=["skip_stream"])
+builder.add_node("Solve_Strategy", plan_solution_strategy, tags=["skip_stream"])
+builder.add_node("Solve_Computation", execute_strategy, tags=["skip_stream"])
+# Writer 노드는 스트리밍 허용 (태그 없음)
+builder.add_node("Solve_Writer", solve_writer)
 builder.set_entry_point("Solve_Analysis")
 builder.add_edge("Solve_Analysis", "Solve_Strategy")
 builder.add_edge("Solve_Strategy", "Solve_Computation")
-builder.add_edge("Solve_Computation", END)
+builder.add_edge("Solve_Computation", "Solve_Writer")
+builder.add_edge("Solve_Writer", END)
 
 graph = builder.compile()

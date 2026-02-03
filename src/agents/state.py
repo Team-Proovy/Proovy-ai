@@ -105,7 +105,6 @@ class ReviewState(BaseModel):
     reasons: List[str] = Field(default_factory=list)
 
 
-
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
@@ -145,3 +144,8 @@ class AgentState(TypedDict):
     solution_chunks: NotRequired[List[str]]
     solution_progress: NotRequired[SolutionProgress]
     solution_pdf: NotRequired[Dict[str, Any]]
+
+    # Agent Writer Layer
+    partial_responses: NotRequired[
+        List[Dict[str, Any]]
+    ]  # Writer 노드가 생성한 부분 응답들
