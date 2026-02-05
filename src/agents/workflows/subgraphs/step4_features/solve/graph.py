@@ -17,8 +17,11 @@ from agents.state import (
 from agents.tools import E2BExecutionError, run_python_with_e2b
 from agents.workflows.utils import (
     call_model,
+    call_model_by_difficulty,
     ensure_str_list,
     extract_ocr_text,
+    get_difficulty_from_state,
+    get_model_name_for_state,
     recent_user_context,
     safe_json_loads,
 )
@@ -136,8 +139,9 @@ Return JSON with:
             "Provide clear step-by-step solutions in Korean. Return valid JSON."
         )
 
-        easy_raw = call_model(
-            OpenRouterModelName.GPT_5_MINI,
+        # 난이도 기반 모델 사용 (easy 문제도 state의 난이도에 따라)
+        easy_raw = call_model_by_difficulty(
+            state,
             easy_system,
             easy_solve_prompt,
         )
@@ -288,8 +292,11 @@ def execute_strategy(state: AgentState) -> AgentState:
         "latex (optional final expression), and summary (one short explanation)."
     )
 
-    summary_raw = call_model(
-        OpenRouterModelName.GPT_5_MINI,
+    # 난이도 기반 모델로 결과 요약 (복잡한 문제는 더 강력한 모델 사용)
+    difficulty = get_difficulty_from_state(state)
+    print(f"→ Summarizing with difficulty: {difficulty}")
+    summary_raw = call_model_by_difficulty(
+        state,
         system_prompt,
         final_prompt,
     )
