@@ -271,18 +271,26 @@ def credit_check_after_feature(state: AgentState) -> AgentState:
     credit_state["difficulty"] = difficulty
 
     # 실행된 Feature에 대한 비용 계산 및 기록
-    if prev_action in FEATURE_BASE_COST:
-        cost = _calculate_feature_cost(prev_action, difficulty)
+    feature_name = prev_action
+    if feature_name not in FEATURE_BASE_COST:
+        prev_action_str = str(prev_action)
+        for name in FEATURE_BASE_COST:
+            if prev_action_str.startswith(name):
+                feature_name = name
+                break
+
+    if feature_name in FEATURE_BASE_COST:
+        cost = _calculate_feature_cost(feature_name, difficulty)
         credit_state["total_cost"] = credit_state.get("total_cost", 0) + cost
 
         # 노드별 비용 기록
         cost_per_node = credit_state.get("cost_per_node", {})
-        cost_per_node[prev_action] = cost_per_node.get(prev_action, 0) + cost
+        cost_per_node[feature_name] = cost_per_node.get(feature_name, 0) + cost
         credit_state["cost_per_node"] = cost_per_node
 
         balance = credit_state.get("balance", 0)
         total_cost = credit_state["total_cost"]
-        print(f"→ Credit used: {prev_action} cost={cost}, total={total_cost}/{balance}")
+        print(f"→ Credit used: {feature_name} cost={cost}, total={total_cost}/{balance}")
 
     # 다음 Feature 실행을 위한 잔액 확인
     remaining_plan = state.get("plan") or []

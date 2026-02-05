@@ -148,6 +148,11 @@ def ensure_str_list(value: Any) -> List[str]:
     return [text] if text else []
 
 
+def _normalize_difficulty(value: Any) -> str:
+    difficulty = str(value).strip().lower()
+    return difficulty if difficulty in DIFFICULTY_MODEL_MAP else "easy"
+
+
 def get_difficulty_from_state(state: AgentState) -> str:
     """state에서 난이도를 추출합니다.
 
@@ -158,15 +163,15 @@ def get_difficulty_from_state(state: AgentState) -> str:
     credit_state = state.get("credit_state")
     if credit_state:
         if isinstance(credit_state, dict):
-            return credit_state.get("difficulty", "easy")
-        return getattr(credit_state, "difficulty", "easy")
+            return _normalize_difficulty(credit_state.get("difficulty", "easy"))
+        return _normalize_difficulty(getattr(credit_state, "difficulty", "easy"))
 
     # router_state에서 확인
     router_state = state.get("router_state")
     if router_state:
         if isinstance(router_state, dict):
-            return router_state.get("difficulty", "easy")
-        return getattr(router_state, "difficulty", "easy")
+            return _normalize_difficulty(router_state.get("difficulty", "easy"))
+        return _normalize_difficulty(getattr(router_state, "difficulty", "easy"))
 
     return "easy"
 

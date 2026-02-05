@@ -299,7 +299,10 @@ def intent(state: AgentState) -> AgentState:
     existing_credit = state.get("credit_state")
     if existing_credit:
         # 기존 상태가 있으면 난이도만 업데이트
-        existing_credit.difficulty = difficulty
+        if isinstance(existing_credit, dict):
+            existing_credit["difficulty"] = difficulty
+        else:
+            existing_credit.difficulty = difficulty
         state["credit_state"] = existing_credit
     else:
         # 새로 초기화

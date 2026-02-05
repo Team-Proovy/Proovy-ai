@@ -1,7 +1,7 @@
 # HTTP API 입·출력에 쓰이는 핵심 데이터 구조(Pydantic 모델)들을 정의한다.
 from typing import Any, Literal, NotRequired
 
-from pydantic import BaseModel, Field, SerializeAsAny
+from pydantic import BaseModel, Field, SerializeAsAny, SecretStr
 from typing_extensions import TypedDict
 
 from schema.models import AllModelEnum, OpenAIModelName
@@ -88,7 +88,7 @@ class UserInput(BaseModel):
         examples=[["Solve", "Explain"]],
         alias="chosenFeatures",
     )
-    auth_token: str | None = Field(
+    auth_token: SecretStr | None = Field(
         description="Spring 백엔드 인증 토큰 (크레딧 API 호출용)",
         default=None,
         alias="authToken",

@@ -204,10 +204,9 @@ async def _handle_input(
         credit_service = get_credit_service()
         balance = await credit_service.get_balance(user_id, token=auth_token)
         input["credit_state"] = {
-            "initial_balance": balance.total_available,
-            "current_balance": balance.total_available,
-            "total_used": 0,
-            "used_per_feature": {},
+            "balance": balance.total_available,
+            "total_cost": 0,
+            "cost_per_node": {},
             "difficulty": "easy",
             "insufficient": False,
             "stopped_at_feature": None,
@@ -217,10 +216,9 @@ async def _handle_input(
         logger.warning(f"Failed to get credit balance: {e}")
         # 크레딧 조회 실패 시 기본값 설정 (무제한처럼 동작)
         input["credit_state"] = {
-            "initial_balance": 999999,
-            "current_balance": 999999,
-            "total_used": 0,
-            "used_per_feature": {},
+            "balance": 999999,
+            "total_cost": 0,
+            "cost_per_node": {},
             "difficulty": "easy",
             "insufficient": False,
             "stopped_at_feature": None,
@@ -389,16 +387,26 @@ async def message_generator(
 
                     # Feature 노드 실행 추적 (크레딧 차감용)
                     feature_nodes = {"Solve", "Explain", "CreateGraph", "Variant", "Solution", "Check"}
-                    if node_name in feature_nodes and node_name not in credit_usage["used_features"]:
-                        credit_usage["used_features"].append(node_name)
-                        logger.info(f"Feature executed: {node_name}")
+                    feature_name = node_name
+                    if node_path:
+                        try:
+                            path_str = str(node_path)
+                            if isinstance(node_path, (tuple, list)) and node_path:
+                                feature_name = str(node_path[0])
+                            elif "/" in path_str:
+                                feature_name = path_str.split("/")[0]
+                        except Exception:
+                            pass
+                    if feature_name in feature_nodes and feature_name not in credit_usage["used_features"]:
+                        credit_usage["used_features"].append(feature_name)
+                        logger.info(f"Feature executed: {feature_name}")
 
                     # credit_state 업데이트 추적
                     if updates and "credit_state" in updates:
                         cs = updates["credit_state"]
                         if isinstance(cs, dict):
                             credit_usage["difficulty"] = cs.get("difficulty", "easy")
-                            credit_usage["total_cost"] = cs.get("total_used", 0)
+                            credit_usage["total_cost"] = cs.get("total_cost", 0)
 
                     updates = updates or {}
                     update_messages = updates.get("messages", [])

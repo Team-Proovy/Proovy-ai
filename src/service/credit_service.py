@@ -81,7 +81,7 @@ class InsufficientCreditError(Exception):
 class CreditService:
     """크레딧 서비스"""
 
-    def __init__(self, spring_api_url: str = None, auth_token: str = None):
+    def __init__(self, spring_api_url: str = None, auth_token: Any = None):
         self.spring_api_url = spring_api_url or getattr(settings, 'SPRING_API_URL', 'http://localhost:8080')
         self.auth_token = auth_token
         self._client: Optional[httpx.AsyncClient] = None
@@ -95,7 +95,12 @@ class CreditService:
         headers = {"Content-Type": "application/json"}
         auth_token = token or self.auth_token
         if auth_token:
-            headers["Authorization"] = f"Bearer {auth_token}"
+            auth_value = (
+                auth_token.get_secret_value()
+                if hasattr(auth_token, "get_secret_value")
+                else auth_token
+            )
+            headers["Authorization"] = f"Bearer {auth_value}"
         return headers
 
     def calculate_cost(
@@ -146,6 +151,8 @@ class CreditService:
         client = await self._get_client()
         url = f"{self.spring_api_url}/api/credits/balance"
         params = {}
+        if user_id:
+            params["userId"] = user_id
         if check_cost is not None:
             params["checkCost"] = check_cost
 
@@ -220,6 +227,8 @@ class CreditService:
             "featureName": feature_name,
             "description": description,
         }
+        if user_id:
+            request_body["userId"] = user_id
         if amount is not None:
             request_body["amount"] = amount
 
@@ -245,8 +254,11 @@ class CreditService:
                 )
 
                 if use_result.insufficient_credit:
+                    required_amount = amount if amount is not None else self.calculate_cost(
+                        feature_name, difficulty, event_type
+                    )
                     raise InsufficientCreditError(
-                        required=self.calculate_cost(feature_name, difficulty, event_type),
+                        required=required_amount,
                         available=use_result.remaining_credit,
                         message=use_result.message,
                     )
