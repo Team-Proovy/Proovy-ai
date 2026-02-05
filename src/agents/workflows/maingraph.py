@@ -2,16 +2,43 @@
 
 상위 레벨에서 Preprocessing / Router / RAG / Features / Review
 같은 큰 노드들(서브그래프) 사이의 흐름을 제어하는 메인 그래프입니다.
+
+크레딧 관리 구조:
+- 시작: 클라이언트에서 credit_state.balance 전달
+- 중간: 각 Feature 노드 실행 후 Conditional Edge로 잔액 체크
+- 종료: 최종 total_cost를 클라이언트에 반환 → Spring API로 정산
 """
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
-from agents.state import AgentState
+from agents.state import AgentState, CreditState
 from core.llm import get_model
 from agents.workflows.review_logic import run_review, run_suggestion
 from agents.workflows.final_response import final_response
+from agents.workflows.utils import (
+    check_credit_sufficient,
+    get_difficulty_from_state,
+    COST_PER_1K_TOKENS,
+)
 from schema.models import OpenRouterModelName
+
+
+# --- 기능별 기본 비용 및 난이도 배수 ---
+FEATURE_BASE_COST = {
+    "Solve": 10,
+    "Explain": 5,
+    "CreateGraph": 5,
+    "Variant": 5,
+    "Solution": 20,
+    "Check": 3,
+}
+
+DIFFICULTY_MULTIPLIER = {
+    "easy": 1.0,
+    "medium": 1.5,
+    "hard": 2.0,
+}
 
 # 각 서브그래프들을 import 합니다.
 from agents.workflows.subgraphs.step1_preprocessing.graph import (
@@ -214,6 +241,116 @@ def fallback(state: AgentState) -> AgentState:
     return state
 
 
+# --- 크레딧 관련 노드 ---
+
+def _calculate_feature_cost(feature_name: str, difficulty: str) -> float:
+    """기능과 난이도에 따른 비용을 계산합니다."""
+    base_cost = FEATURE_BASE_COST.get(feature_name, 5)
+    multiplier = DIFFICULTY_MULTIPLIER.get(difficulty.lower() if difficulty else "easy", 1.0)
+    return round(base_cost * multiplier, 2)
+
+
+def credit_check_after_feature(state: AgentState) -> AgentState:
+    """
+    Feature 실행 완료 후 크레딧을 차감하고, 다음 실행을 위한 잔액을 확인합니다.
+    이 노드는 각 Feature 실행 후에 호출됩니다.
+    """
+    print("---MAIN: CREDIT CHECK AFTER FEATURE---")
+
+    # 방금 실행된 Feature 확인 (prev_action에서)
+    prev_action = state.get("prev_action", "")
+
+    # credit_state 가져오기 또는 초기화
+    credit_state = state.get("credit_state")
+    if credit_state is None:
+        credit_state = {"balance": 0.0, "total_cost": 0.0, "cost_per_node": {}, "difficulty": "easy", "insufficient": False}
+    elif not isinstance(credit_state, dict):
+        credit_state = credit_state.model_dump() if hasattr(credit_state, 'model_dump') else {}
+
+    difficulty = get_difficulty_from_state(state)
+    credit_state["difficulty"] = difficulty
+
+    # 실행된 Feature에 대한 비용 계산 및 기록
+    if prev_action in FEATURE_BASE_COST:
+        cost = _calculate_feature_cost(prev_action, difficulty)
+        credit_state["total_cost"] = credit_state.get("total_cost", 0) + cost
+
+        # 노드별 비용 기록
+        cost_per_node = credit_state.get("cost_per_node", {})
+        cost_per_node[prev_action] = cost_per_node.get(prev_action, 0) + cost
+        credit_state["cost_per_node"] = cost_per_node
+
+        balance = credit_state.get("balance", 0)
+        total_cost = credit_state["total_cost"]
+        print(f"→ Credit used: {prev_action} cost={cost}, total={total_cost}/{balance}")
+
+    # 다음 Feature 실행을 위한 잔액 확인
+    remaining_plan = state.get("plan") or []
+    if remaining_plan:
+        next_feature = remaining_plan[0] if remaining_plan else None
+        if next_feature and next_feature in FEATURE_BASE_COST:
+            next_cost = _calculate_feature_cost(next_feature, difficulty)
+
+            # 잔액 확인 (balance - total_cost)
+            balance = credit_state.get("balance", 0)
+            total_cost = credit_state.get("total_cost", 0)
+            available = balance - total_cost
+
+            if available < next_cost:
+                print(f"→ Insufficient credit for {next_feature} (need: {next_cost}, available: {available})")
+                credit_state["insufficient"] = True
+                credit_state["stopped_at_feature"] = next_feature
+
+    state["credit_state"] = credit_state
+    return state
+
+
+def credit_insufficient(state: AgentState) -> AgentState:
+    """크레딧 부족으로 실행을 중단합니다."""
+    print("---MAIN: CREDIT INSUFFICIENT---")
+
+    credit_state = state.get("credit_state") or {}
+    if not isinstance(credit_state, dict):
+        credit_state = credit_state.model_dump() if hasattr(credit_state, 'model_dump') else {}
+
+    stopped_feature = credit_state.get("stopped_at_feature", "다음 기능")
+    total_cost = credit_state.get("total_cost", 0)
+    cost_per_node = credit_state.get("cost_per_node", {})
+    balance = credit_state.get("balance", 0)
+
+    # 사용 내역 문자열 생성
+    usage_summary = ", ".join([f"{k}: {v}" for k, v in cost_per_node.items()]) if cost_per_node else "없음"
+
+    message = AIMessage(
+        content=(
+            f"크레딧이 부족하여 '{stopped_feature}' 기능을 실행할 수 없습니다.\n\n"
+            f"잔액: {balance}\n"
+            f"지금까지 사용한 크레딧: {total_cost}\n"
+            f"실행된 기능: {usage_summary}\n\n"
+            "크레딧을 충전하시거나, 더 간단한 기능을 선택해 주세요."
+        )
+    )
+    state["messages"] = (state.get("messages") or []) + [message]
+
+    # final_output 업데이트
+    final_output = state.get("final_output") or {}
+    updated_final = (
+        dict(final_output)
+        if isinstance(final_output, dict)
+        else {"text": str(final_output)}
+    )
+    updated_final["credit_insufficient"] = {
+        "stopped_at": stopped_feature,
+        "balance": balance,
+        "total_cost": total_cost,
+        "cost_per_node": cost_per_node,
+    }
+    state["final_output"] = updated_final
+    state["prev_action"] = "CreditInsufficient"
+
+    return state
+
+
 # --- Graph Builder ---
 builder = StateGraph(AgentState)
 
@@ -232,6 +369,9 @@ builder.add_node("Review", review, tags=["nostream"])
 builder.add_node("Suggestion", suggestion, tags=["nostream"])
 builder.add_node("Fallback", fallback)
 builder.add_node("Simple_response", simple_response)
+# 4. 크레딧 관련 노드
+builder.add_node("CreditCheck", credit_check_after_feature, tags=["nostream"])
+builder.add_node("CreditInsufficient", credit_insufficient)
 # FinalResponse 노드는 LangGraph가 내부 LLM 호출을 감지하여
 # 자동으로 토큰을 스트리밍하도록 nostream 태그를 붙이지 않습니다.
 builder.add_node("FinalResponse", final_response)
@@ -291,25 +431,43 @@ builder.add_conditional_edges(
 )
 
 
-# 6. Features -> Plan 완료 체크
-def route_after_feature(state: AgentState) -> str:
-    # Flowchart: "모든 단계 완료?"
-    """Feature 실행 후, 플랜의 다음 단계가 있는지 확인합니다."""
-    if not state.get("plan"):  # plan이 비어있으면
-        return "Review"
-    return "Router"  # 다음 단계를 위해 Executor를 다시 호출해야 함
-
-
-# 각 Feature 노드 실행 후에는 route_after_feature 함수를 통해 분기합니다.
+# 6. Features -> CreditCheck -> Plan 완료 체크
+# 각 Feature 노드 실행 후에는 CreditCheck 노드를 거칩니다.
 for name in FEATURE_MAP:
-    builder.add_conditional_edges(
-        name,
-        route_after_feature,
-        {
-            "Router": "Router",
-            "Review": "Review",
-        },
-    )
+    builder.add_edge(name, "CreditCheck")
+
+
+def route_after_credit_check(state: AgentState) -> str:
+    """CreditCheck 후 다음 단계를 결정합니다."""
+    # 크레딧 부족 확인
+    credit_state = state.get("credit_state")
+    if credit_state:
+        insufficient = False
+        if isinstance(credit_state, dict):
+            insufficient = credit_state.get("insufficient", False)
+        else:
+            insufficient = getattr(credit_state, "insufficient", False)
+
+        if insufficient:
+            return "CreditInsufficient"
+
+    # plan이 비어있으면 Review로
+    if not state.get("plan"):
+        return "Review"
+
+    # 다음 단계를 위해 Router로
+    return "Router"
+
+
+builder.add_conditional_edges(
+    "CreditCheck",
+    route_after_credit_check,
+    {
+        "Router": "Router",
+        "Review": "Review",
+        "CreditInsufficient": "CreditInsufficient",
+    },
+)
 
 
 # 7. Review -> Suggestion or RetryCounter
@@ -327,6 +485,7 @@ builder.add_conditional_edges(
 builder.add_edge("Suggestion", "FinalResponse")
 builder.add_edge("Fallback", "FinalResponse")
 builder.add_edge("Simple_response", "FinalResponse")
+builder.add_edge("CreditInsufficient", "FinalResponse")
 builder.add_edge("FinalResponse", END)
 
 
