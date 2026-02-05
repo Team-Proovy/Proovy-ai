@@ -88,6 +88,11 @@ class UserInput(BaseModel):
         examples=[["Solve", "Explain"]],
         alias="chosenFeatures",
     )
+    auth_token: str | None = Field(
+        description="Spring 백엔드 인증 토큰 (크레딧 API 호출용)",
+        default=None,
+        alias="authToken",
+    )
 
 
 class StreamInput(UserInput):

@@ -54,6 +54,7 @@ from service.utils import (
     langchain_to_chat_message,
     remove_tool_calls,
 )
+from service.credit_service import get_credit_service, CreditService
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
@@ -197,6 +198,34 @@ async def _handle_input(
     if user_input.chosen_features:
         input["chosen_features"] = list(user_input.chosen_features)
 
+    # 크레딧 잔액 조회 및 초기 상태 설정
+    auth_token = getattr(user_input, 'auth_token', None)
+    try:
+        credit_service = get_credit_service()
+        balance = await credit_service.get_balance(user_id, token=auth_token)
+        input["credit_state"] = {
+            "initial_balance": balance.total_available,
+            "current_balance": balance.total_available,
+            "total_used": 0,
+            "used_per_feature": {},
+            "difficulty": "easy",
+            "insufficient": False,
+            "stopped_at_feature": None,
+        }
+        logger.info(f"_handle_input: credit_balance={balance.total_available}")
+    except Exception as e:
+        logger.warning(f"Failed to get credit balance: {e}")
+        # 크레딧 조회 실패 시 기본값 설정 (무제한처럼 동작)
+        input["credit_state"] = {
+            "initial_balance": 999999,
+            "current_balance": 999999,
+            "total_used": 0,
+            "used_per_feature": {},
+            "difficulty": "easy",
+            "insufficient": False,
+            "stopped_at_feature": None,
+        }
+
     kwargs = {
         "input": input,
         "config": config,
@@ -261,6 +290,13 @@ async def message_generator(
     """
     agent: AgentGraph = get_agent(agent_id)
     kwargs, run_id = await _handle_input(user_input, agent)
+
+    # 크레딧 사용 추적을 위한 변수
+    credit_usage: dict[str, Any] = {
+        "used_features": [],
+        "total_cost": 0,
+        "difficulty": "easy",
+    }
 
     # 노드별 진행 상태 문구 매핑 (최종 응답 전까지 "~하고 있습니다" 형태로 전달)
     progress_messages: dict[str, str] = {
@@ -351,6 +387,19 @@ async def message_generator(
                     if progress_line is not None:
                         yield progress_line  # type: ignore[misc]
 
+                    # Feature 노드 실행 추적 (크레딧 차감용)
+                    feature_nodes = {"Solve", "Explain", "CreateGraph", "Variant", "Solution", "Check"}
+                    if node_name in feature_nodes and node_name not in credit_usage["used_features"]:
+                        credit_usage["used_features"].append(node_name)
+                        logger.info(f"Feature executed: {node_name}")
+
+                    # credit_state 업데이트 추적
+                    if updates and "credit_state" in updates:
+                        cs = updates["credit_state"]
+                        if isinstance(cs, dict):
+                            credit_usage["difficulty"] = cs.get("difficulty", "easy")
+                            credit_usage["total_cost"] = cs.get("total_used", 0)
+
                     updates = updates or {}
                     update_messages = updates.get("messages", [])
                     # special cases for using langgraph-supervisor library
@@ -434,6 +483,28 @@ async def message_generator(
         logger.error(f"Error in message generator: {e}")
         yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'}, ensure_ascii=False)}\n\n"
     finally:
+        # 크레딧 차감 처리 (백그라운드에서 실행)
+        try:
+            # 스트리밍 중 수집된 크레딧 사용 정보를 기반으로 API 호출
+            if credit_usage.get("used_features"):
+                user_id = kwargs.get("config", {}).get("configurable", {}).get("user_id", "")
+                auth_token = getattr(user_input, 'auth_token', None)
+                credit_service = get_credit_service()
+
+                for feature in credit_usage["used_features"]:
+                    try:
+                        await credit_service.use_credit(
+                            user_id=user_id,
+                            feature_name=feature,
+                            difficulty=credit_usage.get("difficulty", "easy"),
+                            token=auth_token,
+                        )
+                        logger.info(f"Credit deducted for feature: {feature}")
+                    except Exception as credit_err:
+                        logger.error(f"Failed to deduct credit for {feature}: {credit_err}")
+        except Exception as credit_ex:
+            logger.error(f"Error during credit deduction: {credit_ex}")
+
         yield "data: [DONE]\n\n"
 
 

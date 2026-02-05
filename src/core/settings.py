@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     LANGFUSE_PUBLIC_KEY: SecretStr | None = None
     LANGFUSE_SECRET_KEY: SecretStr | None = None
 
+    # Spring Backend API
+    SPRING_API_URL: str = "http://localhost:8080"
+
     # Database / Vector store configuration
     DATABASE_TYPE: DatabaseType = DatabaseType.CHROMA
     SQLITE_DB_PATH: str = "checkpoints.db"
