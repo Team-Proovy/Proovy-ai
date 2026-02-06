@@ -144,6 +144,11 @@ class AgentState(TypedDict):
     solution_chunks: NotRequired[List[str]]
     solution_progress: NotRequired[SolutionProgress]
     solution_pdf: NotRequired[Dict[str, Any]]
+    last_solved_index: NotRequired[int]  # 마지막으로 풀이가 완료된 문제의 인덱스
+    last_solved_index_ts: NotRequired[int]  # 업데이트 시점 (ms)
+    last_solved_index_source: NotRequired[str]  # 업데이트한 노드/기능 이름
+    solve_all: NotRequired[bool]  # 모든 문제를 한 번에 풀지 여부
+    requested_chunk_size: NotRequired[int]  # 사용자가 요청한 한 번에 풀 문제 수
 
     # Agent Writer Layer
     partial_responses: NotRequired[
