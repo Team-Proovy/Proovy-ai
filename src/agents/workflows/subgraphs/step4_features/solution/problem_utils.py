@@ -7,10 +7,6 @@ import unicodedata
 from typing import Any, List, Optional, Tuple
 
 from agents.state import AgentState
-from agents.workflows.utils import (
-    extract_ocr_text,
-    recent_user_context,
-)
 from .pdf_utils import (
     latex_to_unicode_shared as _render_latex_to_plain
 )
@@ -60,7 +56,7 @@ def _block_text(block: Any) -> str:
     
     t = _global_clean(t)
     if l:
-        # 원문 보존을 위해 LaTeX 원본 유지 
+        # [구조 개선] 원문 보존을 위해 LaTeX 원본 유지 ($ 델리미터 보존)
         l_wrapped = l if l.startswith("$") or l.startswith("\\") else f"${l}$"
         if t:
             # 텍스트와 LaTeX 중복 여부 판단 시 통합 정규화 사용
@@ -74,16 +70,23 @@ def _block_text(block: Any) -> str:
     return t
 
 def _collect_problems(state: AgentState) -> List[str]:
+    # [Fix] Major Null check for file_processing
     file_processing = state.get("file_processing")
+    if not file_processing: return []
+    
     ocr_blocks = file_processing.get("ocr_blocks") if isinstance(file_processing, dict) else getattr(file_processing, "ocr_blocks", None)
+    if not ocr_blocks: return []
+    
     pages = ocr_blocks.get("pages", []) if isinstance(ocr_blocks, dict) else getattr(ocr_blocks, "pages", [])
+    if not pages: return []
     
     problems_map = {}
+    # [Fix] Critical: Move problem_seen_norms outside the page loop to avoid KeyError
+    problem_seen_norms = {} 
     last_num = None
     
     for page in pages:
         blocks = page.get("blocks", []) if isinstance(page, dict) else getattr(page, "blocks", [])
-        problem_seen_norms = {} 
         
         for block in blocks:
             text = _block_text(block)
@@ -132,6 +135,7 @@ def _collect_problems(state: AgentState) -> List[str]:
     return ["\n".join(problems_map[k]).strip() for k in sorted_keys]
 
 def _align_explanations_to_problems(problems, explanations):
+    """[구조 개선] 정렬 단계에서는 단순 매핑만 수행 (표현 변환 개입 금지)"""
     return [str(e).strip() for e in explanations[:len(problems)]]
 
 def _get_problem_title(text: str) -> str:

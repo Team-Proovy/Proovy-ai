@@ -24,7 +24,8 @@ def latex_to_unicode_shared(text: str) -> str:
                lambda m: f"Σ({m.group(1) or ''}→{m.group(2) or ''})", t)
     t = re.sub(r'\\int(?:_\{([^}]+)\})?(?:\^\{([^}]+)\})?', 
                lambda m: f"∫({m.group(1) or ''}→{m.group(2) or ''})", t)
-    t = re.sub(r'\\lim_\{([^}]+)\}', lambda m: f"lim({m.group(1).replace(r'\to', '→')})", t)
+    # [Fix] Python < 3.12 compatibility: avoid backslash in f-string
+    t = re.sub(r'\\lim_\{([^}]+)\}', lambda m: "lim(" + m.group(1).replace('\\to', '→') + ")", t)
     t = re.sub(r'\\(?:d|t)?frac\{([^}]+)\}\{([^}]+)\}', r'(\1/\2)', t)
     t = re.sub(r'\\sqrt(?:\[([^\]]+)\])?\{([^}]+)\}', 
                lambda m: f"{m.group(1) or ''}√{m.group(2)}", t)
@@ -76,14 +77,14 @@ def latex_to_unicode_shared(text):
     
     t = re.sub(r'\\sum(?:_\{([^}]+)\})?(?:\^\{([^}]+)\})?', lambda m: f"Σ({m.group(1) or ''}→{m.group(2) or ''})", t)
     t = re.sub(r'\\int(?:_\{([^}]+)\})?(?:\^\{([^}]+)\})?', lambda m: f"∫({m.group(1) or ''}→{m.group(2) or ''})", t)
-    t = re.sub(r'\\lim_\{([^}]+)\}', lambda m: f"lim({m.group(1).replace('\\to', '→')})", t)
+    t = re.sub(r'\\lim_\{([^}]+)\}', lambda m: "lim(" + m.group(1).replace('\\to', '→') + ")", t)
     t = re.sub(r'\\(?:d|t)?frac\{([^}]+)\}\{([^}]+)\}', r'(\1/\2)', t)
     t = re.sub(r'\\sqrt(?:\[([^\]]+)\])?\{([^}]+)\}', lambda m: f"{m.group(1) or ''}√{m.group(2)}", t)
     
     mapping = {
-        '\alpha': 'α', '\beta': 'β', '\gamma': 'γ', '\delta': 'δ', '\epsilon': 'ε',
-        '\infty': '∞', '\to': '→', '\times': '×', '\cdot': '·', '\neq': '≠',
-        '\sin': 'sin', '\cos': 'cos', '\tan': 'tan', '\ln': 'ln', '\log': 'log',
+        r'\alpha': 'α', r'\beta': 'β', r'\gamma': 'γ', r'\delta': 'δ', r'\epsilon': 'ε',
+        r'\infty': '∞', r'\to': '→', r'\times': '×', r'\cdot': '·', r'\neq': '≠',
+        r'\sin': 'sin', r'\cos': 'cos', r'\tan': 'tan', r'\ln': 'ln', r'\log': 'log',
     }
     for k, v in mapping.items(): t = t.replace(k, v)
     
