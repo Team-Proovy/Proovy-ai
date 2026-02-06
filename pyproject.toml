@@ -18,6 +18,8 @@ dependencies = [
     "langgraph-cli[inmem]>=0.4.11",
     "pdf2image>=1.17.0",
     "pillow>=12.1.0",
+    "reportlab>=4.2.0",
+    "matplotlib>=3.8.0",
     "e2b-code-interpreter>=1.0.4",
 ]
 

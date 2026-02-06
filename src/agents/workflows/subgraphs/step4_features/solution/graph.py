@@ -1,8 +1,6 @@
 """Solution feature subgraph.
 해설 텍스트는 LLM으로 만들고, PDF는 e2b_runner에서 파이썬 코드로 생성한다.
-
 """
-
 
 from __future__ import annotations
 
@@ -16,21 +14,25 @@ from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState, SolutionProgress, SolutionResult
 from agents.tools import E2BExecutionError, run_python_with_e2b
-from agents.workflows.utils import (
-    call_model,
-    extract_ocr_text,
-    recent_user_context,
-    safe_json_loads,
-)
+from agents.workflows.utils import call_model, safe_json_loads
 from schema.models import OpenRouterModelName
+
+from .pdf_utils import (
+    _build_pdf_code,
+    _execute_pdf_locally,
+    _extract_pdf_meta,
+    _merge_local_font_env,
+    _resolve_local_pdf_path,
+)
+from .problem_utils import (
+    _align_explanations_to_problems,
+    _build_pdf_entries,
+    _collect_problems,
+    _render_latex_to_plain,
+)
 
 
 CHUNK_SIZE_DEFAULT = 5
-PROBLEM_MARKER_PATTERN = re.compile(r"(?m)^\s*(?:문제\s*)?\d{1,3}[\.\)]\s+")
-OPTION_LIKE_PATTERN = re.compile(
-    r"^\s*(?:[A-D]|[가-라]|[A-D가-라]형|①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩|\d+\s*/\s*\d+|\d+)\s*$"
-)
-LEADING_NUMBER_PATTERN = re.compile(r"^\s*(?:문제\s*)?(\d{1,3})\s*(?:번|[.\)])?")
 SOLUTION_JSON_EXAMPLE = '{"explanations":["해설1","해설2"],"chunk_summary":"요약"}'
 
 
@@ -56,384 +58,77 @@ def _ensure_solution_result(state: AgentState) -> SolutionResult:
     return result
 
 
-def _block_text(block: Any) -> str:
-    if isinstance(block, dict):
-        text = block.get("text")
-        latex = block.get("latex")
-    else:
-        text = getattr(block, "text", None)
-        latex = getattr(block, "latex", None)
-    parts: List[str] = []
-    if text:
-        parts.append(str(text).strip())
-    if latex:
-        latex_value = str(latex).strip()
-        if latex_value and latex_value not in parts:
-            parts.append(latex_value)
-    return "\n".join([p for p in parts if p]).strip()
+def _record_pdf_success(
+    solution_result: SolutionResult,
+    tool_outputs: dict,
+    *,
+    pdf_path: str,
+    pdf_name: str,
+    pdf_size: Optional[int],
+    pdf_base64: Optional[str],
+    pdf_font: Optional[str],
+    pdf_font_path: Optional[str],
+    pdf_font_loaded: Optional[bool],
+    stdout_lines: List[str],
+    stderr_lines: List[str],
+    source: str,
+) -> None:
+    solution_result.pdf_path = pdf_path
+    solution_result.pdf_file_name = pdf_name
+    solution_result.pdf_mime_type = "application/pdf"
+    solution_result.pdf_file_size = pdf_size
+    solution_result.pdf_error = None
+    tool_outputs["solution_pdf"] = {
+        "success": True,
+        "source": source,
+        "stdout": stdout_lines,
+        "stderr": stderr_lines,
+        "pdf_path": pdf_path,
+        "file_name": pdf_name,
+        "mime_type": "application/pdf",
+        "file_size": pdf_size,
+        "pdf_base64": pdf_base64,
+        "pdf_font": pdf_font,
+        "pdf_font_path": pdf_font_path,
+        "pdf_font_loaded": pdf_font_loaded,
+    }
 
 
-def _page_blocks_from_state(state: AgentState) -> List[List[str]]:
-    file_processing = state.get("file_processing")
-    ocr_blocks = None
-    if isinstance(file_processing, dict):
-        ocr_blocks = file_processing.get("ocr_blocks")
-    elif file_processing is not None:
-        ocr_blocks = getattr(file_processing, "ocr_blocks", None)
-
-    pages = None
-    if isinstance(ocr_blocks, dict):
-        pages = ocr_blocks.get("pages")
-    elif isinstance(ocr_blocks, list):
-        pages = ocr_blocks
-    elif ocr_blocks is not None:
-        pages = getattr(ocr_blocks, "pages", None)
-
-    if not isinstance(pages, list):
-        return []
-
-    page_blocks: List[List[str]] = []
-    for page in pages:
-        if isinstance(page, dict):
-            blocks = page.get("blocks") or []
-        else:
-            blocks = getattr(page, "blocks", None) or []
-        if not isinstance(blocks, list):
-            blocks = [blocks]
-        block_texts: List[str] = []
-        for block in blocks:
-            text = _block_text(block)
-            if text:
-                block_texts.append(text)
-        if block_texts:
-            page_blocks.append(block_texts)
-    return page_blocks
-
-
-def _split_by_problem_markers(text: str) -> List[str]:
-    if not text:
-        return []
-    matches = list(PROBLEM_MARKER_PATTERN.finditer(text))
-    if len(matches) < 2:
-        return [text.strip()]
-    segments: List[str] = []
-    for idx, match in enumerate(matches):
-        start = match.start()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        segment = text[start:end].strip()
-        if segment:
-            segments.append(segment)
-    return segments
-
-
-def _is_probable_problem_start(text: str) -> bool:
-    stripped = text.strip()
-    if not stripped:
-        return False
-    if not PROBLEM_MARKER_PATTERN.match(stripped):
-        return False
-    if "문제" in stripped or "보기" in stripped:
-        return True
-    after = PROBLEM_MARKER_PATTERN.sub("", stripped, count=1).strip()
-    if not after:
-        return False
-    if len(after) <= 3:
-        return False
-    if OPTION_LIKE_PATTERN.match(after):
-        return False
-    return True
-
-
-def _collect_problems(state: AgentState) -> List[str]:
-    page_blocks = _page_blocks_from_state(state)
-    problems_with_meta: List[Tuple[int, int, str]] = []
-    for page_idx, blocks in enumerate(page_blocks):
-        if not blocks:
-            continue
-        has_marker = any(_is_probable_problem_start(text) for text in blocks)
-        if not has_marker:
-            page_text = "\n".join(blocks).strip()
-            if page_text:
-                problems_with_meta.append((page_idx, 0, page_text))
-            continue
-
-        current_parts: List[str] = []
-        current_meta: Optional[Tuple[int, int]] = None
-        for block_idx, text in enumerate(blocks):
-            stripped = text.strip()
-            if not stripped:
-                continue
-            if _is_probable_problem_start(stripped):
-                if current_parts:
-                    problems_with_meta.append(
-                        (current_meta[0], current_meta[1], "\n".join(current_parts).strip())
-                    )
-                current_parts = [stripped]
-                current_meta = (page_idx, block_idx)
-            else:
-                if current_parts:
-                    current_parts.append(stripped)
-                else:
-                    current_parts = [stripped]
-                    current_meta = (page_idx, block_idx)
-        if current_parts:
-            problems_with_meta.append(
-                (current_meta[0], current_meta[1], "\n".join(current_parts).strip())
-            )
-
-    if problems_with_meta:
-        if os.getenv("SOLUTION_SORT_BY_NUMBER") == "1":
-            extracted: List[Tuple[int, int, int, Optional[int], str]] = []
-            for idx, (page_idx, block_idx, text) in enumerate(problems_with_meta):
-                match = LEADING_NUMBER_PATTERN.match(text.strip())
-                num = int(match.group(1)) if match else None
-                extracted.append((page_idx, block_idx, idx, num, text))
-            nums = [item[3] for item in extracted if item[3] is not None]
-            if nums and len(nums) >= len(extracted) // 2:
-                extracted.sort(
-                    key=lambda x: (
-                        x[3] if x[3] is not None else 10**6,
-                        x[0],
-                        x[1],
-                        x[2],
-                    )
-                )
-                return [item[4] for item in extracted]
-        return [item[2] for item in problems_with_meta]
-
-    fallback = extract_ocr_text(state) or recent_user_context(state)
-    if fallback:
-        return [fallback.strip()]
-    return []
-
-
-def _build_pdf_code(payload: dict) -> str:
-    # e2b 샌드박스에서 실행할 파이썬 코드 문자열을 생성한다.
-    payload_json = json.dumps(payload, ensure_ascii=False)
-    template = """
-import json
-import os
-import sys
-import subprocess
-import base64
-import urllib.request
-import shutil
-import socket
-
-try:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.utils import simpleSplit
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-except Exception:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "reportlab"])
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.utils import simpleSplit
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-
-data = json.loads(__PAYLOAD_JSON__)
-pdf_path = data.get("pdf_path") or "/home/user/solution.pdf"
-file_name = data.get("file_name") or os.path.basename(pdf_path)
-emit_base64 = bool(data.get("emit_base64"))
-font_urls = data.get("font_urls") or []
-if isinstance(font_urls, str):
-    font_urls = [font_urls]
-font_base64 = data.get("font_base64")
-
-c = canvas.Canvas(pdf_path, pagesize=A4)
-width, height = A4
-margin = 48
-y = height - margin
-font_name = "Helvetica"
-font_size = 11
-title_size = 15
-question_size = 12
-answer_size = 10
-section_gap = 8
-separator_line = "-" * 48
-font_path = os.getenv(
-    "SOLUTION_FONT_PATH",
-    "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.ttf",
-)
-font_loaded = False
-
-def download_font(url, dest, timeout=10):
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "SolutionPDFAgent/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if getattr(resp, "status", 200) != 200:
-                return False
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            with open(dest, "wb") as out:
-                shutil.copyfileobj(resp, out)
-        os.chmod(dest, 0o644)
-        if os.path.getsize(dest) < 1024:
-            return False
-        return True
-    except (urllib.error.URLError, socket.timeout, PermissionError):
-        return False
-
-if not os.path.exists(font_path) and font_urls:
-    for url in font_urls:
-        if not url:
-            continue
-        if download_font(url, font_path):
-            break
-if not os.path.exists(font_path) and font_base64:
-    try:
-        os.makedirs(os.path.dirname(font_path), exist_ok=True)
-        with open(font_path, "wb") as out:
-            out.write(base64.b64decode(font_base64))
-        os.chmod(font_path, 0o644)
-    except Exception:
-        pass
-if os.path.exists(font_path):
-    try:
-        pdfmetrics.registerFont(TTFont("NotoSansKR", font_path))
-        font_name = "NotoSansKR"
-        font_loaded = True
-    except Exception:
-        font_name = "Helvetica"
-c.setFont(font_name, font_size)
-line_height = font_size + 4
-
-def draw_wrapped(text, *, font=None, size=None, extra_gap=0):
-    global y
-    use_font = font or font_name
-    use_size = size or font_size
-    max_width = width - 2 * margin
-    lines = simpleSplit(str(text), use_font, use_size, max_width)
-    for ln in lines:
-        if y < margin + (use_size + 4):
-            c.showPage()
-            c.setFont(use_font, use_size)
-            y = height - margin
-        c.setFont(use_font, use_size)
-        c.drawString(margin, y, ln)
-        y -= (use_size + 4)
-    if extra_gap:
-        y -= extra_gap
-
-title = data.get("title", "Solution")
-draw_wrapped(title, size=title_size, extra_gap=section_gap)
-draw_wrapped(separator_line, size=answer_size, extra_gap=section_gap)
-
-entries = data.get("entries", [])
-for idx, entry in enumerate(entries, start=1):
-    q = entry.get("problem", "")
-    a = entry.get("explanation", "")
-    draw_wrapped(separator_line, size=answer_size, extra_gap=section_gap)
-    draw_wrapped(f"Q{idx}. {q}", size=question_size, extra_gap=section_gap)
-    draw_wrapped(str(a), size=answer_size, extra_gap=section_gap)
-    draw_wrapped("")
-
-summary = data.get("summary")
-if summary:
-    draw_wrapped("Summary:", size=question_size, extra_gap=section_gap)
-    draw_wrapped(str(summary), size=answer_size)
-
-c.save()
-try:
-    file_size = os.path.getsize(pdf_path)
-except Exception:
-    file_size = None
-print(f"PDF_PATH: {pdf_path}")
-print(f"PDF_NAME: {file_name}")
-print(f"PDF_SIZE: {file_size}")
-print(f"PDF_FONT: {font_name}")
-print(f"PDF_FONT_PATH: {font_path}")
-print(f"PDF_FONT_LOADED: {font_loaded}")
-if emit_base64:
-    try:
-        with open(pdf_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("ascii")
-        print(f"PDF_BASE64: {encoded}")
-    except Exception as exc:
-        print(f"PDF_BASE64_ERROR: {exc}")
-""".strip()
-    return template.replace("__PAYLOAD_JSON__", repr(payload_json))
-
-
-def _extract_pdf_meta(
-    stdout: List[str] | str,
-) -> Tuple[
-    Optional[str],
-    Optional[str],
-    Optional[int],
-    Optional[str],
-    Optional[str],
-    Optional[str],
-    Optional[bool],
-]:
-    if isinstance(stdout, str):
-        raw_lines = stdout.splitlines()
-    else:
-        raw_lines = list(stdout)
-    lines: List[str] = []
-    for item in raw_lines:
-        if isinstance(item, str):
-            lines.extend(item.splitlines())
-        else:
-            lines.append(str(item))
-    pdf_path = None
-    pdf_name = None
-    pdf_size: Optional[int] = None
-    pdf_base64: Optional[str] = None
-    pdf_font: Optional[str] = None
-    pdf_font_path: Optional[str] = None
-    pdf_font_loaded: Optional[bool] = None
-    for line in reversed(lines):
-        if "PDF_PATH:" in line:
-            pdf_path = line.split("PDF_PATH:", 1)[-1].strip() or None
-        if "PDF_NAME:" in line:
-            pdf_name = line.split("PDF_NAME:", 1)[-1].strip() or None
-        if "PDF_SIZE:" in line:
-            raw = line.split("PDF_SIZE:", 1)[-1].strip()
-            try:
-                pdf_size = int(raw)
-            except (TypeError, ValueError):
-                pdf_size = None
-        if "PDF_BASE64:" in line and pdf_base64 is None:
-            pdf_base64 = line.split("PDF_BASE64:", 1)[-1].strip() or None
-        if "PDF_FONT:" in line and pdf_font is None:
-            pdf_font = line.split("PDF_FONT:", 1)[-1].strip() or None
-        if "PDF_FONT_PATH:" in line and pdf_font_path is None:
-            pdf_font_path = line.split("PDF_FONT_PATH:", 1)[-1].strip() or None
-        if "PDF_FONT_LOADED:" in line and pdf_font_loaded is None:
-            raw = line.split("PDF_FONT_LOADED:", 1)[-1].strip()
-            pdf_font_loaded = raw.lower() == "true"
-        if pdf_path and pdf_name and pdf_size is not None and (
-            pdf_base64 is not None or pdf_base64 is None
-        ):
-            break
-    return (
-        pdf_path,
-        pdf_name,
-        pdf_size,
-        pdf_base64,
-        pdf_font,
-        pdf_font_path,
-        pdf_font_loaded,
-    )
+def _record_pdf_failure(
+    solution_result: SolutionResult,
+    tool_outputs: dict,
+    exc: Exception,
+    stdout_lines: List[str],
+    stderr_lines: List[str],
+) -> None:
+    solution_result.pdf_error = str(exc)
+    tool_outputs["solution_pdf"] = {
+        "success": False,
+        "stdout": stdout_lines,
+        "stderr": stderr_lines or [str(exc)],
+    }
 
 
 def _build_solution_prompts(problems: List[str]) -> Tuple[str, str]:
     system_prompt = (
-        "You are a Korean math tutor. Provide detailed explanations in Korean.\n"
+        "You are a Korean tutor. Provide detailed explanations in Korean.\n"
         "Return ONLY valid JSON. No markdown, no extra text.\n"
         "Keys: explanations (list), chunk_summary (string).\n"
-        "The length of explanations MUST equal the number of problems and keep order."
+        "The length of explanations MUST equal the number of problems and keep order.\n"
+        "Each explanation MUST start with the original problem number.\n"
+        "Each explanation MUST include a first line formatted as '정답: ...' "
+        "with the final answer."
     )
     user_prompt = (
         "다음 문제들에 대한 해설을 작성해 주세요.\n"
         "출력은 반드시 JSON만 반환하세요.\n\n"
         "예시 형식:\n"
         f"{SOLUTION_JSON_EXAMPLE}\n\n"
+        "각 해설은 원본 문제 번호로 시작하고, 첫 줄에 '정답: 정답 내용 및 값'을 포함하세요.\n"
+        "수식 내의 지수나 첨자를 주의 깊게 확인하고 원문의 선택지 내에서만 답을 고르세요.\n"
+        "**중요: 만약 계산 결과가 주어진 선택지 ①~⑤ 중에 없다면, 자신의 계산 과정을 다시 검토하여 반드시 선택지 중 하나를 최종 정답으로 도출하세요. 절대로 선택지에 없는 값을 정답으로 쓰지 마세요.**\n"
+        "정답은 보기/선택지 형식(예: ②, ㄱ·ㄴ·ㄷ, 14/81 등)을 그대로 쓰고, "
+        "가능하면 결과를 한 번 검산해 주세요.\n\n"
         "문제 목록:\n"
         + json.dumps({"problems": problems}, ensure_ascii=False, indent=2)
     )
@@ -484,6 +179,8 @@ def solution(state: AgentState) -> AgentState:
 
     progress = _ensure_progress(state)
     solution_result = _ensure_solution_result(state)
+    final_output = state.setdefault("final_output", {}) # [Fix] Early initialization
+    
     problems = state.get("solution_chunks") or _collect_problems(state)
     state["solution_chunks"] = problems
 
@@ -512,6 +209,7 @@ def solution(state: AgentState) -> AgentState:
 
     tool_outputs = state.setdefault("tool_outputs", {})
     explanations, chunk_summary = _request_explanations(chunk_problems, tool_outputs)
+    explanations = _align_explanations_to_problems(chunk_problems, explanations)
 
     solution_result.guide = chunk_summary or solution_result.guide or "해설을 생성했습니다."
     solution_result.chunk_index = current_chunk_index + 1
@@ -524,6 +222,12 @@ def solution(state: AgentState) -> AgentState:
 
     pdf_file_name = f"solution_chunk_{solution_result.chunk_index}.pdf"
     emit_base64 = os.getenv("SOLUTION_EMIT_PDF_BASE64") == "1"
+    
+    render_latex_enabled = (
+        os.getenv("SOLUTION_USE_MATH_RENDER", "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+
     font_urls_env = os.getenv("SOLUTION_FONT_URLS")
     if font_urls_env:
         font_urls = [item.strip() for item in font_urls_env.split(",") if item.strip()]
@@ -546,13 +250,18 @@ def solution(state: AgentState) -> AgentState:
                     font_base64 = re.sub(r"\s+", "", handle.read())
             except OSError:
                 font_base64 = None
+
+    pdf_chunk_problems = chunk_problems
+    pdf_explanations = explanations
+
+    if not render_latex_enabled:
+        pdf_chunk_problems = [_render_latex_to_plain(p) for p in chunk_problems]
+        pdf_explanations = [_render_latex_to_plain(e) for e in explanations]
+
     pdf_payload = {
         "title": f"Solution Chunk {solution_result.chunk_index}/{total_chunks}",
-        "entries": [
-            {"problem": prob, "explanation": exp}
-            for prob, exp in zip(chunk_problems, explanations)
-        ],
-        "summary": chunk_summary,
+        "entries": _build_pdf_entries(pdf_chunk_problems, pdf_explanations),
+        "summary": None,
         "pdf_path": f"/home/user/{pdf_file_name}",
         "file_name": pdf_file_name,
         "emit_base64": emit_base64,
@@ -560,8 +269,67 @@ def solution(state: AgentState) -> AgentState:
         "font_base64": font_base64,
     }
     pdf_code = _build_pdf_code(pdf_payload)
+    sandbox_envs: dict[str, str] = {}
+    font_path_env = os.getenv("SOLUTION_FONT_PATH")
+    if font_path_env:
+        sandbox_envs["SOLUTION_FONT_PATH"] = font_path_env
+    install_deps_env = os.getenv("SOLUTION_E2B_INSTALL_DEPS")
+    if install_deps_env:
+        sandbox_envs["SOLUTION_E2B_INSTALL_DEPS"] = install_deps_env
+    
+    use_math_render_env = os.getenv("SOLUTION_USE_MATH_RENDER")
+    if use_math_render_env:
+        sandbox_envs["SOLUTION_USE_MATH_RENDER"] = use_math_render_env
+
+    install_deps = os.getenv("SOLUTION_E2B_INSTALL_DEPS", "").strip().lower() in {
+        "1", "true", "yes", "y", "on",
+    }
+    timeout_env = os.getenv("SOLUTION_E2B_TIMEOUT")
+    timeout = None
+    if timeout_env:
+        try:
+            timeout = float(timeout_env)
+        except ValueError:
+            timeout = None
+    if timeout is None:
+        timeout = 300.0 if install_deps else 180.0
+    request_timeout = timeout + 60.0 if timeout else None
+    reuse_env = os.getenv("SOLUTION_E2B_REUSE", "").strip().lower()
+    reuse_sandbox = reuse_env not in {"0", "false", "no", "off"}
+    
+    attempts: List[Tuple[dict[str, str], bool]] = [(sandbox_envs, reuse_sandbox)]
+    if reuse_sandbox:
+        attempts.append((sandbox_envs, False))
+    if render_latex_enabled:
+        fallback_envs = dict(sandbox_envs)
+        fallback_envs["SOLUTION_USE_MATH_RENDER"] = "0"
+        attempts.append((fallback_envs, False))
+    execution = None
+    stdout_lines: List[str] = []
+    stderr_lines: List[str] = []
+    pdf_error: Exception | None = None
+    pdf_success = False
     try:
-        execution = run_python_with_e2b(pdf_code)
+        execution = None
+        last_exc: Exception | None = None
+        for envs, reuse_flag in attempts:
+            try:
+                execution = run_python_with_e2b(
+                    pdf_code,
+                    envs=envs or None,
+                    timeout=timeout,
+                    request_timeout=request_timeout,
+                    reuse_sandbox=reuse_flag,
+                )
+                last_exc = None
+                break
+            except E2BExecutionError as exc:
+                last_exc = exc
+                if "UnexpectedEndOfExecution" in str(exc):
+                    continue
+                raise
+        if execution is None and last_exc is not None:
+            raise last_exc
 
         raw_stdout = execution.stdout if hasattr(execution, "stdout") else execution
         if isinstance(raw_stdout, str):
@@ -590,45 +358,143 @@ def solution(state: AgentState) -> AgentState:
         ) = _extract_pdf_meta(stdout_lines)
         pdf_path = pdf_path or pdf_payload["pdf_path"]
         pdf_name = pdf_name or pdf_file_name
-        solution_result.pdf_path = pdf_path
-        solution_result.pdf_file_name = pdf_name
-        solution_result.pdf_mime_type = "application/pdf"
-        solution_result.pdf_file_size = pdf_size
-        solution_result.pdf_error = None
-        tool_outputs["solution_pdf"] = {
-            "success": True,
-            "stdout": stdout_lines,
-            "stderr": stderr_lines,
-            "pdf_path": pdf_path,
-            "file_name": pdf_name,
-            "mime_type": "application/pdf",
-            "file_size": pdf_size,
-            "pdf_base64": pdf_base64,
-            "pdf_font": pdf_font,
-            "pdf_font_path": pdf_font_path,
-            "pdf_font_loaded": pdf_font_loaded,
-        }
+        _record_pdf_success(
+            solution_result,
+            tool_outputs,
+            pdf_path=pdf_path,
+            pdf_name=pdf_name,
+            pdf_size=pdf_size,
+            pdf_base64=pdf_base64,
+            pdf_font=pdf_font,
+            pdf_font_path=pdf_font_path,
+            pdf_font_loaded=pdf_font_loaded,
+            stdout_lines=stdout_lines,
+            stderr_lines=stderr_lines,
+            source="e2b",
+        )
+        pdf_success = True
     except Exception as exc:
-        solution_result.pdf_error = str(exc)
-        tool_outputs["solution_pdf"] = {
-            "success": False,
-            "stdout": [],
-            "stderr": [str(exc)],
-        }
+        pdf_error = exc
+        stdout_lines = []
+        stderr_lines = []
+        try:
+            execution_obj = None
+            if isinstance(exc, E2BExecutionError) and getattr(exc, "execution", None):
+                execution_obj = exc.execution
+            elif "execution" in locals() and execution is not None:
+                execution_obj = execution
+
+            if execution_obj is not None:
+                raw_stdout = getattr(execution_obj, "stdout", None)
+                raw_stderr = getattr(execution_obj, "stderr", None)
+                if raw_stdout is None and hasattr(execution_obj, "logs"):
+                    raw_stdout = getattr(execution_obj.logs, "stdout", None)
+                if raw_stderr is None and hasattr(execution_obj, "logs"):
+                    raw_stderr = getattr(execution_obj.logs, "stderr", None)
+
+                if isinstance(raw_stdout, str):
+                    stdout_lines = raw_stdout.splitlines()
+                elif isinstance(raw_stdout, list):
+                    stdout_lines = raw_stdout
+
+                if isinstance(raw_stderr, str):
+                    stderr_lines = raw_stderr.splitlines()
+                elif isinstance(raw_stderr, list):
+                    stderr_lines = raw_stderr
+        except Exception:
+            pass
+
+    if not pdf_success:
+        local_fallback_enabled = (
+            os.getenv("SOLUTION_LOCAL_FALLBACK", "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
+        if local_fallback_enabled:
+            local_payload = dict(pdf_payload)
+            local_payload["pdf_path"] = _resolve_local_pdf_path(pdf_file_name)
+            local_code = _build_pdf_code(local_payload)
+            local_exc: Exception | None = None
+            for envs, _reuse_flag in attempts:
+                local_envs = _merge_local_font_env(
+                    envs,
+                    pdf_path=local_payload["pdf_path"],
+                )
+                ok, local_stdout, local_stderr, local_exc = _execute_pdf_locally(
+                    local_code,
+                    local_envs,
+                )
+                if ok:
+                    stdout_lines = local_stdout
+                    stderr_lines = local_stderr
+                    (
+                        pdf_path,
+                        pdf_name,
+                        pdf_size,
+                        pdf_base64,
+                        pdf_font,
+                        pdf_font_path,
+                        pdf_font_loaded,
+                    ) = _extract_pdf_meta(stdout_lines)
+                    pdf_path = pdf_path or local_payload["pdf_path"]
+                    pdf_name = pdf_name or pdf_file_name
+                    _record_pdf_success(
+                        solution_result,
+                        tool_outputs,
+                        pdf_path=pdf_path,
+                        pdf_name=pdf_name,
+                        pdf_size=pdf_size,
+                        pdf_base64=pdf_base64,
+                        pdf_font=pdf_font,
+                        pdf_font_path=pdf_font_path,
+                        pdf_font_loaded=pdf_font_loaded,
+                        stdout_lines=stdout_lines,
+                        stderr_lines=stderr_lines,
+                        source="local",
+                    )
+                    pdf_success = True
+                    pdf_error = None
+                    solution_result.pdf_error = None
+                    
+                    final_output["final_answer"] = (
+                        f"요청하신 해설지 PDF 생성을 완료했습니다.\n\n"
+                        f"파일 정보\n"
+                        f"- 파일명: {pdf_name}\n"
+                        f"- 저장 경로: {pdf_path}\n"
+                        f"- 파일 크기: {pdf_size or 0} bytes\n\n"
+                        f"내용 요약: {solution_result.chunk_summary or '해설 생성이 완료되었습니다.'}"
+                    )
+                    break
+                if local_stdout:
+                    stdout_lines = local_stdout
+                if local_stderr:
+                    stderr_lines = local_stderr
+            if not pdf_success and local_exc is not None:
+                if pdf_error is not None and str(pdf_error) != str(local_exc):
+                    pdf_error = RuntimeError(
+                        f"{pdf_error} | local_fallback: {local_exc}"
+                    )
+                else:
+                    pdf_error = local_exc
+
+    if not pdf_success:
+        if pdf_error is None:
+            pdf_error = RuntimeError("PDF generation failed.")
+        _record_pdf_failure(
+            solution_result, tool_outputs, pdf_error, stdout_lines, stderr_lines
+        )
 
     progress.current_chunk = current_chunk_index + 1
     progress.done = progress.current_chunk >= total_chunks
     remaining_count = max(0, total_problems - (progress.current_chunk * chunk_size))
     state["solution_progress"] = progress
 
-    final_output = state.setdefault("final_output", {})
     final_output["solution"] = {
         "chunk_index": solution_result.chunk_index,
         "chunk_size": solution_result.chunk_size,
         "total_problems": solution_result.total_problems,
         "total_chunks": solution_result.total_chunks,
-        "problems": solution_result.problems,
-        "explanations": solution_result.explanations,
+        "problems": [_render_latex_to_plain(p) for p in solution_result.problems],
+        "explanations": [_render_latex_to_plain(e) for e in solution_result.explanations],
         "chunk_summary": solution_result.chunk_summary,
         "pdf_path": solution_result.pdf_path,
         "pdf_file_name": solution_result.pdf_file_name,
@@ -639,19 +505,11 @@ def solution(state: AgentState) -> AgentState:
         "remaining_count": remaining_count,
     }
     if tool_outputs.get("solution_pdf"):
-        final_output["solution"]["pdf_font"] = tool_outputs["solution_pdf"].get(
-            "pdf_font"
-        )
-        final_output["solution"]["pdf_font_path"] = tool_outputs["solution_pdf"].get(
-            "pdf_font_path"
-        )
-        final_output["solution"]["pdf_font_loaded"] = tool_outputs["solution_pdf"].get(
-            "pdf_font_loaded"
-        )
+        final_output["solution"]["pdf_font"] = tool_outputs["solution_pdf"].get("pdf_font")
+        final_output["solution"]["pdf_font_path"] = tool_outputs["solution_pdf"].get("pdf_font_path")
+        final_output["solution"]["pdf_font_loaded"] = tool_outputs["solution_pdf"].get("pdf_font_loaded")
     if emit_base64:
-        final_output["solution"]["pdf_base64"] = tool_outputs.get("solution_pdf", {}).get(
-            "pdf_base64"
-        )
+        final_output["solution"]["pdf_base64"] = tool_outputs.get("solution_pdf", {}).get("pdf_base64")
     if not progress.done:
         next_batch = min(chunk_size, remaining_count) if remaining_count else chunk_size
         final_output["solution"]["suggestions"] = [
