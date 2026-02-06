@@ -28,6 +28,7 @@ from .problem_utils import (
     _align_explanations_to_problems,
     _build_pdf_entries,
     _collect_problems,
+    _render_latex_to_plain,
 )
 
 
@@ -55,10 +56,6 @@ def _ensure_solution_result(state: AgentState) -> SolutionResult:
         result = SolutionResult()
     state["solution_result"] = result
     return result
-
-
-
-
 
 
 def _record_pdf_success(
@@ -114,18 +111,24 @@ def _record_pdf_failure(
 
 def _build_solution_prompts(problems: List[str]) -> Tuple[str, str]:
     system_prompt = (
-        "You are a Korean math tutor. Provide detailed explanations in Korean.\n"
+        "You are a Korean tutor. Provide detailed explanations in Korean.\n"
         "Return ONLY valid JSON. No markdown, no extra text.\n"
         "Keys: explanations (list), chunk_summary (string).\n"
         "The length of explanations MUST equal the number of problems and keep order.\n"
-        "Each explanation MUST start with the original problem number."
+        "Each explanation MUST start with the original problem number.\n"
+        "Each explanation MUST include a first line formatted as '정답: ...' "
+        "with the final answer."
     )
     user_prompt = (
         "다음 문제들에 대한 해설을 작성해 주세요.\n"
         "출력은 반드시 JSON만 반환하세요.\n\n"
         "예시 형식:\n"
         f"{SOLUTION_JSON_EXAMPLE}\n\n"
-        "각 해설은 원본 문제 번호로 시작하세요.\n\n"
+        "각 해설은 원본 문제 번호로 시작하고, 첫 줄에 '정답: 정답 내용 및 값'을 포함하세요.\n"
+        "수식 내의 지수나 첨자를 주의 깊게 확인하고 원문의 선택지 내에서만 답을 고르세요.\n"
+        "**중요: 만약 계산 결과가 주어진 선택지 ①~⑤ 중에 없다면, 자신의 계산 과정을 다시 검토하여 반드시 선택지 중 하나를 최종 정답으로 도출하세요. 절대로 선택지에 없는 값을 정답으로 쓰지 마세요.**\n"
+        "정답은 보기/선택지 형식(예: ②, ㄱ·ㄴ·ㄷ, 14/81 등)을 그대로 쓰고, "
+        "가능하면 결과를 한 번 검산해 주세요.\n\n"
         "문제 목록:\n"
         + json.dumps({"problems": problems}, ensure_ascii=False, indent=2)
     )
@@ -176,6 +179,8 @@ def solution(state: AgentState) -> AgentState:
 
     progress = _ensure_progress(state)
     solution_result = _ensure_solution_result(state)
+    final_output = state.setdefault("final_output", {}) # [Fix] Early initialization
+    
     problems = state.get("solution_chunks") or _collect_problems(state)
     state["solution_chunks"] = problems
 
@@ -217,6 +222,12 @@ def solution(state: AgentState) -> AgentState:
 
     pdf_file_name = f"solution_chunk_{solution_result.chunk_index}.pdf"
     emit_base64 = os.getenv("SOLUTION_EMIT_PDF_BASE64") == "1"
+    
+    render_latex_enabled = (
+        os.getenv("SOLUTION_USE_MATH_RENDER", "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+
     font_urls_env = os.getenv("SOLUTION_FONT_URLS")
     if font_urls_env:
         font_urls = [item.strip() for item in font_urls_env.split(",") if item.strip()]
@@ -239,9 +250,17 @@ def solution(state: AgentState) -> AgentState:
                     font_base64 = re.sub(r"\s+", "", handle.read())
             except OSError:
                 font_base64 = None
+
+    pdf_chunk_problems = chunk_problems
+    pdf_explanations = explanations
+
+    if not render_latex_enabled:
+        pdf_chunk_problems = [_render_latex_to_plain(p) for p in chunk_problems]
+        pdf_explanations = [_render_latex_to_plain(e) for e in explanations]
+
     pdf_payload = {
         "title": f"Solution Chunk {solution_result.chunk_index}/{total_chunks}",
-        "entries": _build_pdf_entries(chunk_problems, explanations),
+        "entries": _build_pdf_entries(pdf_chunk_problems, pdf_explanations),
         "summary": None,
         "pdf_path": f"/home/user/{pdf_file_name}",
         "file_name": pdf_file_name,
@@ -257,15 +276,13 @@ def solution(state: AgentState) -> AgentState:
     install_deps_env = os.getenv("SOLUTION_E2B_INSTALL_DEPS")
     if install_deps_env:
         sandbox_envs["SOLUTION_E2B_INSTALL_DEPS"] = install_deps_env
-    render_latex_env = os.getenv("SOLUTION_RENDER_LATEX")
-    if render_latex_env:
-        sandbox_envs["SOLUTION_RENDER_LATEX"] = render_latex_env
+    
+    use_math_render_env = os.getenv("SOLUTION_USE_MATH_RENDER")
+    if use_math_render_env:
+        sandbox_envs["SOLUTION_USE_MATH_RENDER"] = use_math_render_env
+
     install_deps = os.getenv("SOLUTION_E2B_INSTALL_DEPS", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
+        "1", "true", "yes", "y", "on",
     }
     timeout_env = os.getenv("SOLUTION_E2B_TIMEOUT")
     timeout = None
@@ -279,16 +296,13 @@ def solution(state: AgentState) -> AgentState:
     request_timeout = timeout + 60.0 if timeout else None
     reuse_env = os.getenv("SOLUTION_E2B_REUSE", "").strip().lower()
     reuse_sandbox = reuse_env not in {"0", "false", "no", "off"}
-    render_latex_enabled = (
-        os.getenv("SOLUTION_RENDER_LATEX", "1").strip().lower()
-        not in {"0", "false", "no", "off"}
-    )
+    
     attempts: List[Tuple[dict[str, str], bool]] = [(sandbox_envs, reuse_sandbox)]
     if reuse_sandbox:
         attempts.append((sandbox_envs, False))
     if render_latex_enabled:
         fallback_envs = dict(sandbox_envs)
-        fallback_envs["SOLUTION_RENDER_LATEX"] = "0"
+        fallback_envs["SOLUTION_USE_MATH_RENDER"] = "0"
         attempts.append((fallback_envs, False))
     execution = None
     stdout_lines: List[str] = []
@@ -438,6 +452,17 @@ def solution(state: AgentState) -> AgentState:
                         source="local",
                     )
                     pdf_success = True
+                    pdf_error = None
+                    solution_result.pdf_error = None
+                    
+                    final_output["final_answer"] = (
+                        f"요청하신 해설지 PDF 생성을 완료했습니다.\n\n"
+                        f"파일 정보\n"
+                        f"- 파일명: {pdf_name}\n"
+                        f"- 저장 경로: {pdf_path}\n"
+                        f"- 파일 크기: {pdf_size or 0} bytes\n\n"
+                        f"내용 요약: {solution_result.chunk_summary or '해설 생성이 완료되었습니다.'}"
+                    )
                     break
                 if local_stdout:
                     stdout_lines = local_stdout
@@ -463,14 +488,13 @@ def solution(state: AgentState) -> AgentState:
     remaining_count = max(0, total_problems - (progress.current_chunk * chunk_size))
     state["solution_progress"] = progress
 
-    final_output = state.setdefault("final_output", {})
     final_output["solution"] = {
         "chunk_index": solution_result.chunk_index,
         "chunk_size": solution_result.chunk_size,
         "total_problems": solution_result.total_problems,
         "total_chunks": solution_result.total_chunks,
-        "problems": solution_result.problems,
-        "explanations": solution_result.explanations,
+        "problems": [_render_latex_to_plain(p) for p in solution_result.problems],
+        "explanations": [_render_latex_to_plain(e) for e in solution_result.explanations],
         "chunk_summary": solution_result.chunk_summary,
         "pdf_path": solution_result.pdf_path,
         "pdf_file_name": solution_result.pdf_file_name,
@@ -481,19 +505,11 @@ def solution(state: AgentState) -> AgentState:
         "remaining_count": remaining_count,
     }
     if tool_outputs.get("solution_pdf"):
-        final_output["solution"]["pdf_font"] = tool_outputs["solution_pdf"].get(
-            "pdf_font"
-        )
-        final_output["solution"]["pdf_font_path"] = tool_outputs["solution_pdf"].get(
-            "pdf_font_path"
-        )
-        final_output["solution"]["pdf_font_loaded"] = tool_outputs["solution_pdf"].get(
-            "pdf_font_loaded"
-        )
+        final_output["solution"]["pdf_font"] = tool_outputs["solution_pdf"].get("pdf_font")
+        final_output["solution"]["pdf_font_path"] = tool_outputs["solution_pdf"].get("pdf_font_path")
+        final_output["solution"]["pdf_font_loaded"] = tool_outputs["solution_pdf"].get("pdf_font_loaded")
     if emit_base64:
-        final_output["solution"]["pdf_base64"] = tool_outputs.get("solution_pdf", {}).get(
-            "pdf_base64"
-        )
+        final_output["solution"]["pdf_base64"] = tool_outputs.get("solution_pdf", {}).get("pdf_base64")
     if not progress.done:
         next_batch = min(chunk_size, remaining_count) if remaining_count else chunk_size
         final_output["solution"]["suggestions"] = [

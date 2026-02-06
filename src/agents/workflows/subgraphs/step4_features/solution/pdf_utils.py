@@ -1,545 +1,317 @@
-from __future__ import annotations
-
-import base64
-import io
 import json
 import os
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-from typing import List, Optional, Tuple
-
-
-def _build_pdf_code(payload: dict) -> str:
-    # e2b 샌드박스에서 실행할 파이썬 코드 문자열을 생성한다.
-    payload_json = json.dumps(payload, ensure_ascii=False)
-    payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
-    template = """
-import json
-import os
-import base64
-import io
 import re
-import urllib.request
-import shutil
-import socket
-import sys
+import base64
 import subprocess
+import tempfile
+import sys
+import traceback
+from typing import Any, Dict, List, Optional, Tuple
 
-render_latex = os.getenv("SOLUTION_RENDER_LATEX", "1").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-    "off",
-)
+# --- [Single Source of Truth] LaTeX to Plain Text Conversion Logic ---
+def latex_to_unicode_shared(text: str) -> str:
+    """LaTeX을 사람이 읽기 좋은 유니코드/플레인 텍스트로 변환하는 최상급 렌더러"""
+    if not text: return ""
+    
+    # 1. 기초 정규화: 델리미터 및 불필요한 명령어 제거
+    t = text.replace('\\\\', '\\').strip()
+    if t.startswith('$') and t.endswith('$'): t = t[1:-1]
+    elif t.startswith(r'\(') and t.endswith(r'\)'): t = t[2:-2]
+    elif t.startswith(r'\[') and t.endswith(r'\]'): t = t[2:-2]
+    
+    # 2. 구조적 변환 (AST-like handling for operators)
+    t = re.sub(r'\\sum(?:_\{([^}]+)\})?(?:\^\{([^}]+)\})?', 
+               lambda m: f"Σ({m.group(1) or ''}→{m.group(2) or ''})", t)
+    t = re.sub(r'\\int(?:_\{([^}]+)\})?(?:\^\{([^}]+)\})?', 
+               lambda m: f"∫({m.group(1) or ''}→{m.group(2) or ''})", t)
+    t = re.sub(r'\\lim_\{([^}]+)\}', lambda m: f"lim({m.group(1).replace(r'\to', '→')})", t)
+    t = re.sub(r'\\(?:d|t)?frac\{([^}]+)\}\{([^}]+)\}', r'(\1/\2)', t)
+    t = re.sub(r'\\sqrt(?:\[([^\]]+)\])?\{([^}]+)\}', 
+               lambda m: f"{m.group(1) or ''}√{m.group(2)}", t)
+    
+    # 3. 그리스 문자 및 특수 기호 매핑
+    mapping = {
+        r'\alpha': 'α', r'\beta': 'β', r'\gamma': 'γ', r'\delta': 'δ', r'\epsilon': 'ε',
+        r'\zeta': 'ζ', r'\eta': 'η', r'\theta': 'θ', r'\iota': 'ι', r'\kappa': 'κ',
+        r'\lambda': 'λ', r'\mu': 'μ', r'\nu': 'ν', r'\xi': 'ξ', r'\pi': 'π',
+        r'\rho': 'ρ', r'\sigma': 'σ', r'\tau': 'τ', r'\phi': 'φ', r'\chi': 'χ',
+        r'\psi': 'ψ', r'\omega': 'ω', r'\infty': '∞', r'\to': '→', r'\times': '×',
+        r'\cdot': '·', r'\pm': '±', r'\mp': '∓', r'\neq': '≠', r'\le': '≤',
+        r'\ge': '≥', r'\partial': '∂', r'\nabla': '∇', r'\forall': '∀', r'\exists': '∃',
+        r'\in': '∈', r'\notin': '∉', r'\subset': '⊂', r'\supset': '⊃', r'\cup': '∪',
+        r'\cap': '∩', r'\approx': '≈', r'\equiv': '≡', r'\sin': 'sin', r'\cos': 'cos',
+        r'\tan': 'tan', r'\exp': 'exp', r'\ln': 'ln', r'\log': 'log',
+    }
+    for k, v in mapping.items():
+        t = t.replace(k, v)
+        
+    # 4. 지수 및 첨자 (유니코드 변환)
+    sup_map = str.maketrans("0123456789+-=()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ")
+    sub_map = str.maketrans("0123456789+-=()n", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₙ")
+    t = re.sub(r'\^\{?([0-9+\-=()n]+)\}?', lambda m: m.group(1).translate(sup_map), t)
+    t = re.sub(r'_\{?([0-9+\-=()n]+)\}?', lambda m: m.group(1).translate(sub_map), t)
+    
+    # 5. 남은 LaTeX 명령어 및 서식 제거
+    t = re.sub(r'\\[a-zA-Z]+', '', t)
+    t = t.replace('{', '').replace('}', '').replace(r'\(', '').replace(r'\)', '')
+    
+    return t.strip()
 
-_DEPS_INSTALLED = False
+# --- PDF Generation Template (E2B Sandbox) ---
+template = r"""
+import os
+import re
+import json
+import base64
+import sys
+import traceback
+from io import BytesIO
 
-
-def _maybe_install_deps():
-    global _DEPS_INSTALLED
-    if _DEPS_INSTALLED:
-        return True
-    flag = os.getenv("SOLUTION_E2B_INSTALL_DEPS", "").strip().lower()
-    if flag not in ("1", "true", "yes", "y", "on"):
-        return False
-    print("DEPS_INSTALL_START")
-    try:
-        packages = ["reportlab"]
-        if render_latex:
-            packages.append("matplotlib")
-        subprocess.check_call(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "-q",
-                *packages,
-            ]
-        )
-        _DEPS_INSTALLED = True
-        print("DEPS_INSTALL_DONE")
-        return True
-    except Exception as exc:
-        print(f"DEPS_INSTALL_FAIL: {exc}")
-        return False
+# 1. LaTeX to Unicode Shared Logic
+def latex_to_unicode_shared(text):
+    if not text: return ""
+    t = text.replace('\\', '\x01').replace('\x01\x01', '\x01').replace('\x01', '\\').strip()
+    if t.startswith('$') and t.endswith('$'): t = t[1:-1]
+    elif t.startswith('\\(') and t.endswith('\\)'): t = t[2:-2]
+    
+    t = re.sub(r'\\sum(?:_\{([^}]+)\})?(?:\^\{([^}]+)\})?', lambda m: f"Σ({m.group(1) or ''}→{m.group(2) or ''})", t)
+    t = re.sub(r'\\int(?:_\{([^}]+)\})?(?:\^\{([^}]+)\})?', lambda m: f"∫({m.group(1) or ''}→{m.group(2) or ''})", t)
+    t = re.sub(r'\\lim_\{([^}]+)\}', lambda m: f"lim({m.group(1).replace('\\to', '→')})", t)
+    t = re.sub(r'\\(?:d|t)?frac\{([^}]+)\}\{([^}]+)\}', r'(\1/\2)', t)
+    t = re.sub(r'\\sqrt(?:\[([^\]]+)\])?\{([^}]+)\}', lambda m: f"{m.group(1) or ''}√{m.group(2)}", t)
+    
+    mapping = {
+        '\alpha': 'α', '\beta': 'β', '\gamma': 'γ', '\delta': 'δ', '\epsilon': 'ε',
+        '\infty': '∞', '\to': '→', '\times': '×', '\cdot': '·', '\neq': '≠',
+        '\sin': 'sin', '\cos': 'cos', '\tan': 'tan', '\ln': 'ln', '\log': 'log',
+    }
+    for k, v in mapping.items(): t = t.replace(k, v)
+    
+    sup_map = str.maketrans("0123456789+-=()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ")
+    sub_map = str.maketrans("0123456789+-=()n", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₙ")
+    t = re.sub(r'\^\{?([0-9+\-=()n]+)\}?', lambda m: m.group(1).translate(sup_map), t)
+    t = re.sub(r'_\{?([0-9+\-=()n]+)\}?', lambda m: m.group(1).translate(sub_map), t)
+    t = re.sub(r'\\[a-zA-Z]+', '', t)
+    return t.replace('{', '').replace('}', '').strip()
 
 try:
-    from reportlab.lib.pagesizes import A4
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt, font_manager
     from reportlab.pdfgen import canvas
-    from reportlab.lib.utils import simpleSplit, ImageReader
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.utils import ImageReader, simpleSplit
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
-except Exception:
-    if _maybe_install_deps():
-        from reportlab.lib.pagesizes import A4
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.utils import simpleSplit, ImageReader
-        from reportlab.pdfbase import pdfmetrics
-        from reportlab.pdfbase.ttfonts import TTFont
-    else:
-        raise
-plt = None
-if render_latex:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        from matplotlib import pyplot as plt
-    except Exception:
-        if _maybe_install_deps():
-            try:
-                import matplotlib
-                matplotlib.use("Agg")
-                from matplotlib import pyplot as plt
-            except Exception:
-                plt = None
 
-data = json.loads(base64.b64decode("__PAYLOAD_JSON_B64__").decode("utf-8"))
-pdf_path = data.get("pdf_path") or "/home/user/solution.pdf"
-file_name = data.get("file_name") or os.path.basename(pdf_path)
-emit_base64 = bool(data.get("emit_base64"))
-font_urls = data.get("font_urls") or []
-if isinstance(font_urls, str):
-    font_urls = [font_urls]
-font_base64 = data.get("font_base64")
-print(f"ENV_RENDER_LATEX: {render_latex}")
-print(f"ENV_INSTALL_DEPS: {os.getenv('SOLUTION_E2B_INSTALL_DEPS') or ''}")
+    # 2. Configuration
+    data = json.loads(base64.b64decode("{{PAYLOAD}}").decode("utf-8"))
+    use_math_render = os.getenv("SOLUTION_USE_MATH_RENDER", "0") == "1"
+    render_math_as_plain = os.getenv("SOLUTION_RENDER_MATH_AS_PLAIN", "1") == "1"
+    complexity_threshold = int(os.getenv("SOLUTION_MATH_COMPLEXITY_THRESHOLD", "3"))
+    include_original = os.getenv("SOLUTION_INCLUDE_ORIGINAL", "1") == "1"
 
-c = canvas.Canvas(pdf_path, pagesize=A4)
-width, height = A4
-margin = 48
-y = height - margin
-font_name = "Helvetica"
-font_size = 11
-title_size = 15
-question_size = 12
-answer_size = 10
-section_gap = 8
-separator_line = "-" * 48
-font_path = os.getenv(
-    "SOLUTION_FONT_PATH",
-    "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.ttf",
-)
-font_loaded = False
+    font_name = "Helvetica" 
+    font_path = "/tmp/font.ttf"
+    font_loaded = False
 
-def download_font(url, dest, timeout=10):
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "SolutionPDFAgent/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if getattr(resp, "status", 200) != 200:
-                return False
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            with open(dest, "wb") as out:
-                shutil.copyfileobj(resp, out)
-        os.chmod(dest, 0o644)
-        if os.path.getsize(dest) < 1024:
-            return False
-        return True
-    except (urllib.error.URLError, socket.timeout, PermissionError):
-        return False
-
-if not os.path.exists(font_path) and font_urls:
-    for url in font_urls:
-        if not url:
-            continue
-        if download_font(url, font_path):
-            break
-if not os.path.exists(font_path) and font_base64:
-    try:
-        os.makedirs(os.path.dirname(font_path), exist_ok=True)
-        with open(font_path, "wb") as out:
-            out.write(base64.b64decode(font_base64))
-        os.chmod(font_path, 0o644)
-    except Exception:
-        pass
-if os.path.exists(font_path):
-    try:
+    if data.get("font_base64"):
+        with open(font_path, "wb") as f:
+            f.write(base64.b64decode(data["font_base64"]))
         pdfmetrics.registerFont(TTFont("NotoSansKR", font_path))
         font_name = "NotoSansKR"
         font_loaded = True
-    except Exception:
-        font_name = "Helvetica"
-c.setFont(font_name, font_size)
-math_dpi = 200
-latex_line_pattern = re.compile(r"\\[a-zA-Z]+")
-option_line_pattern = re.compile(
-    r"^\s*(?:[①-⑳]|[ㄱ-ㅎ]\.|[A-D]\.|[가-라]\.|\\d{1,3}[.)])\s+"
-)
-hangul_pattern = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]")
-latex_token_replacements = {
-    "\\\\times": "×",
-    "\\\\cdot": "·",
-    "\\\\pi": "π",
-    "\\\\infty": "∞",
-    "\\\\sum": "∑",
-    "\\\\ln": "ln",
-    "\\\\to": "→",
-    "\\\\le": "≤",
-    "\\\\ge": "≥",
-    "\\\\neq": "≠",
-    "\\\\approx": "≈",
-    "\\\\sim": "~",
-}
+        fe = font_manager.FontEntry(fname=font_path, name="NotoSansKR")
+        font_manager.fontManager.ttflist.insert(0, fe)
+        plt.rcParams["font.family"] = fe.name
 
+    print(f"PDF_RENDERER_STATUS: font={font_name} loaded={font_loaded}")
+    plt.rcParams['mathtext.fontset'] = 'stix'
+    plt.rcParams['axes.unicode_minus'] = False
 
-def _normalize_latex(text):
-    cleaned = text.strip()
-    cleaned = re.sub(r"\\text\\{([^}]*)\\}", r"\\1", cleaned)
-    return cleaned
+    def _clean(t):
+        if not t: return ""
+        return re.sub(r'[¤□\xa0]', ' ', t).strip()
 
+    def _split_segments(text):
+        if not text: return []
+        math_re = re.compile(r'(\$[^$]+\$|\\\(.*?\\\)|\\\[.*?\\\])')
+        parts = []
+        idx = 0
+        for m in math_re.finditer(text):
+            if m.start() > idx: parts.append(("text", text[idx:m.start()]))
+            parts.append(("math", m.group(0)))
+            idx = m.end()
+        if idx < len(text): parts.append(("text", text[idx:]))
+        return parts
 
-def _replace_latex_tokens(text):
-    cleaned = re.sub(r"\\\\text\\{([^}]*)\\}", r"\\1", str(text))
-    cleaned = re.sub(
-        r"\\\\frac\\{([^{}]+)\\}\\{([^{}]+)\\}",
-        r"(\\1)/(\\2)",
-        cleaned,
-    )
-    for key, value in latex_token_replacements.items():
-        cleaned = cleaned.replace(key, value)
-    return cleaned
+    def _is_complex_latex(s):
+        if not s: return False
+        cnt_cmds = len(re.findall(r"\\[a-zA-Z]+", s))
+        has_env = bool(re.search(r"\\begin\{|matrix|pmatrix|cases|\\displaystyle", s))
+        has_frac = bool(re.search(r"\\(?:d|t)?frac\s*\{[^}]*\}\s*\{[^}]*\}", s))
+        return (cnt_cmds >= complexity_threshold) or has_env or has_frac or (len(s) > 120)
 
+    _MATH_IMG_CACHE = {}
 
-def _contains_hangul(text):
-    return bool(hangul_pattern.search(text))
-
-
-def _is_latex_line(text):
-    if not text:
-        return False
-    if _contains_hangul(text):
-        return False
-    if "\\\\" in text or "$" in text:
-        return True
-    if any(sym in text for sym in ("∑", "Σ", "√", "^", "_")):
-        return True
-    token_count = len(latex_line_pattern.findall(text))
-    return token_count >= 1
-
-
-def _render_latex_image(text, size):
-    if plt is None:
-        return None
-    latex = _normalize_latex(text)
-    if not latex:
-        return None
-    if not latex.startswith("$"):
-        latex = f"${latex}$"
-    fig = None
-    try:
-        fig = plt.figure()
-        fig.text(0, 0, latex, fontsize=size)
-        buffer = io.BytesIO()
-        fig.savefig(
-            buffer,
-            format="png",
-            dpi=math_dpi,
-            bbox_inches="tight",
-            pad_inches=0.02,
-            transparent=True,
-        )
+    def _render_math_img_cached(math_text, size):
+        if math_text in _MATH_IMG_CACHE: return _MATH_IMG_CACHE[math_text]
+        inner = math_text.replace('\\\\', '\\').strip()
+        if inner.startswith('$') and inner.endswith('$'): inner = inner[1:-1]
+        inner = re.sub(r'([가-힣\s]+)', lambda m: f"\\text{{{m.group(0).strip()}}}", inner)
+        
+        fig = plt.figure(figsize=(max(0.1, len(inner)*0.15), max(0.1, size/15)))
+        plt.axis('off')
+        plt.text(0, 0.5, f"${inner}$", fontsize=size, color='black', verticalalignment='center')
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=200, bbox_inches='tight', transparent=True)
         plt.close(fig)
-        buffer.seek(0)
-        return buffer
-    except Exception:
-        if fig is not None:
-            try:
-                plt.close(fig)
-            except Exception:
-                pass
-        return None
+        buf.seek(0)
+        _MATH_IMG_CACHE[math_text] = buf
+        return buf
 
-
-def _is_option_like_line(text):
-    if not text:
-        return False
-    return bool(option_line_pattern.match(text))
-
-
-def _normalize_segments(text):
-    lines = [ln.rstrip() for ln in str(text).splitlines()]
-    segments = []
-    buffer = []
-
-    def flush_buffer():
-        if not buffer:
+    def draw_text(text, size=11, gap=5, indent=0, color=(0,0,0)):
+        global y
+        text = _clean(text)
+        if not text: return
+        max_w = A4[0] - 100 - indent
+        
+        if render_math_as_plain:
+            c.setFont(font_name, size)
+            c.setFillColorRGB(*color)
+            for ln in simpleSplit(text, font_name, size, max_w):
+                if y < 50: c.showPage(); y = A4[1]-50; c.setFont(font_name, size)
+                c.drawString(50 + indent, y, ln)
+                y -= (size + gap)
             return
-        paragraph = " ".join(part.strip() for part in buffer if part.strip())
-        paragraph = _replace_latex_tokens(paragraph)
-        if paragraph:
-            segments.append({"type": "text", "text": paragraph})
-        buffer.clear()
 
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            flush_buffer()
-            segments.append({"type": "blank"})
-            continue
-        if _is_latex_line(stripped):
-            flush_buffer()
-            segments.append({"type": "latex", "text": stripped})
-            continue
-        if stripped.startswith("정답:"):
-            flush_buffer()
-            segments.append({"type": "text", "text": _replace_latex_tokens(stripped)})
-            segments.append({"type": "blank"})
-            continue
-        if stripped in {"보기", "보기:"} or _is_option_like_line(stripped):
-            flush_buffer()
-            segments.append({"type": "text", "text": _replace_latex_tokens(stripped)})
-            continue
-        buffer.append(stripped)
-
-    flush_buffer()
-    return segments
-
-def draw_wrapped(text, *, font=None, size=None, extra_gap=0):
-    global y
-    use_font = font or font_name
-    use_size = size or font_size
-    max_width = width - 2 * margin
-    for segment in _normalize_segments(text):
-        seg_type = segment["type"]
-        if seg_type == "blank":
-            y -= (use_size + 4)
-            continue
-        if seg_type == "latex":
-            image_buf = _render_latex_image(segment["text"], use_size + 2)
-            if image_buf is None:
-                continue
-            img = ImageReader(image_buf)
-            img_w, img_h = img.getSize()
-            width_pt = img_w * 72 / math_dpi
-            height_pt = img_h * 72 / math_dpi
-            if width_pt > max_width:
-                scale = max_width / width_pt
-                width_pt *= scale
-                height_pt *= scale
-            if y < margin + height_pt:
-                c.showPage()
-                c.setFont(use_font, use_size)
-                y = height - margin
-            c.drawImage(
-                img,
-                margin,
-                y - height_pt,
-                width=width_pt,
-                height=height_pt,
-                mask="auto",
-            )
-            y -= (height_pt + 4)
-            continue
-        wrapped = simpleSplit(segment["text"], use_font, use_size, max_width)
-        for ln in wrapped:
-            if y < margin + (use_size + 4):
-                c.showPage()
-                c.setFont(use_font, use_size)
-                y = height - margin
-            c.setFont(use_font, use_size)
-            c.drawString(margin, y, ln)
-            y -= (use_size + 4)
-    if extra_gap:
-        y -= extra_gap
-
-title = data.get("title", "Solution")
-draw_wrapped(title, size=title_size, extra_gap=section_gap)
-draw_wrapped(separator_line, size=answer_size, extra_gap=section_gap)
-
-entries = data.get("entries", [])
-for entry in entries:
-    label = entry.get("number")
-    q = entry.get("problem", "")
-    a = entry.get("explanation", "")
-    ans = entry.get("answer", "")
-    if label is not None:
-        question_label = f"{label}. {q}".strip()
-    else:
-        question_label = str(q)
-    draw_wrapped(separator_line, size=answer_size, extra_gap=section_gap)
-    draw_wrapped(question_label, size=question_size, extra_gap=section_gap)
-    draw_wrapped("정답:", size=answer_size)
-    if ans:
-        draw_wrapped(str(ans), size=answer_size, extra_gap=section_gap)
-    else:
-        draw_wrapped("-", size=answer_size, extra_gap=section_gap)
-    draw_wrapped(str(a), size=answer_size, extra_gap=section_gap)
-    draw_wrapped("")
-
-c.save()
-try:
-    file_size = os.path.getsize(pdf_path)
-except Exception:
-    file_size = None
-print(f"PDF_PATH: {pdf_path}")
-print(f"PDF_NAME: {file_name}")
-print(f"PDF_SIZE: {file_size}")
-print(f"PDF_FONT: {font_name}")
-print(f"PDF_FONT_PATH: {font_path}")
-print(f"PDF_FONT_LOADED: {font_loaded}")
-if emit_base64:
-    try:
-        with open(pdf_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("ascii")
-        chunk_size = int(os.getenv("SOLUTION_PDF_BASE64_CHUNK", "4096"))
-        if chunk_size < 256:
-            chunk_size = 256
-        print("PDF_BASE64_BEGIN")
-        for i in range(0, len(encoded), chunk_size):
-            print(f"PDF_BASE64_CHUNK:{encoded[i:i+chunk_size]}")
-        print("PDF_BASE64_END")
-    except Exception as exc:
-        print(f"PDF_BASE64_ERROR: {exc}")
-""".strip()
-    return template.replace("__PAYLOAD_JSON_B64__", payload_b64)
-
-
-def _extract_pdf_meta(
-    stdout: List[str] | str,
-) -> Tuple[
-    Optional[str],
-    Optional[str],
-    Optional[int],
-    Optional[str],
-    Optional[str],
-    Optional[str],
-    Optional[bool],
-]:
-    if isinstance(stdout, str):
-        raw_lines = stdout.splitlines()
-    else:
-        raw_lines = list(stdout)
-    lines: List[str] = []
-    for item in raw_lines:
-        if isinstance(item, str):
-            lines.extend(item.splitlines())
-        else:
-            lines.append(str(item))
-    pdf_path = None
-    pdf_name = None
-    pdf_size: Optional[int] = None
-    pdf_base64: Optional[str] = None
-    pdf_font: Optional[str] = None
-    pdf_font_path: Optional[str] = None
-    pdf_font_loaded: Optional[bool] = None
-    base64_chunks: List[str] = []
-    collecting = False
-    for line in lines:
-        if line.startswith("PDF_BASE64:"):
-            pdf_base64 = line.split("PDF_BASE64:", 1)[-1].strip() or None
-            collecting = False
-            base64_chunks = []
-            continue
-        if line.startswith("PDF_BASE64_BEGIN"):
-            collecting = True
-            base64_chunks = []
-            continue
-        if line.startswith("PDF_BASE64_END"):
-            if base64_chunks:
-                pdf_base64 = "".join(base64_chunks)
-            collecting = False
-            continue
-        if line.startswith("PDF_BASE64_CHUNK:") and collecting:
-            chunk = line.split("PDF_BASE64_CHUNK:", 1)[-1].strip()
-            if chunk:
-                base64_chunks.append(chunk)
-
-    for line in reversed(lines):
-        if "PDF_PATH:" in line:
-            pdf_path = line.split("PDF_PATH:", 1)[-1].strip() or None
-        if "PDF_NAME:" in line:
-            pdf_name = line.split("PDF_NAME:", 1)[-1].strip() or None
-        if "PDF_SIZE:" in line:
-            raw = line.split("PDF_SIZE:", 1)[-1].strip()
-            try:
-                pdf_size = int(raw)
-            except (TypeError, ValueError):
-                pdf_size = None
-        if "PDF_BASE64:" in line and pdf_base64 is None:
-            pdf_base64 = line.split("PDF_BASE64:", 1)[-1].strip() or None
-        if "PDF_FONT:" in line and pdf_font is None:
-            pdf_font = line.split("PDF_FONT:", 1)[-1].strip() or None
-        if "PDF_FONT_PATH:" in line and pdf_font_path is None:
-            pdf_font_path = line.split("PDF_FONT_PATH:", 1)[-1].strip() or None
-        if "PDF_FONT_LOADED:" in line and pdf_font_loaded is None:
-            raw = line.split("PDF_FONT_LOADED:", 1)[-1].strip()
-            pdf_font_loaded = raw.lower() == "true"
-        if pdf_path and pdf_name and pdf_size is not None:
-            break
-    return (
-        pdf_path,
-        pdf_name,
-        pdf_size,
-        pdf_base64,
-        pdf_font,
-        pdf_font_path,
-        pdf_font_loaded,
-    )
-
-
-@contextmanager
-def _temporary_env(envs: dict[str, str] | None):
-    if not envs:
-        yield
-        return
-    previous: dict[str, Optional[str]] = {}
-    for key, value in envs.items():
-        previous[key] = os.environ.get(key)
-        os.environ[key] = value
-    try:
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
+        for typ, content in _split_segments(text):
+            if typ == "text":
+                c.setFont(font_name, size); c.setFillColorRGB(*color)
+                for ln in simpleSplit(content, font_name, size, max_w):
+                    if y < 50: c.showPage(); y = A4[1]-50; c.setFont(font_name, size)
+                    c.drawString(50+indent, y, ln)
+                    y -= (size+gap)
             else:
-                os.environ[key] = value
+                if not render_math_as_plain and use_math_render and _is_complex_latex(content):
+                    try:
+                        buf = _render_math_img_cached(content, size)
+                        if buf:
+                            img = ImageReader(buf)
+                            iw, ih = img.getSize()
+                            wp, hp = iw * 72 / 200, ih * 72 / 200
+                            if wp > max_w: hp *= (max_w/wp); wp = max_w
+                            if y < hp + 50: c.showPage(); y = A4[1]-50
+                            c.drawImage(img, 50 + indent, y - hp, width=wp, height=hp, mask='auto')
+                            y -= (hp + gap)
+                            continue
+                    except:
+                        pass # Fallback to plain
+                
+                plain = latex_to_unicode_shared(content)
+                c.setFont(font_name, size); c.setFillColorRGB(*color)
+                for ln in simpleSplit(plain, font_name, size, max_w):
+                    if y < 50: c.showPage(); y = A4[1]-50; c.setFont(font_name, size)
+                    c.drawString(50+indent, y, ln)
+                    y -= (size+gap)
 
+    # 4. Main Execution
+    output_path = data.get("pdf_path", "solution.pdf")
+    out_dir = os.path.dirname(output_path) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    
+    c = canvas.Canvas(output_path, pagesize=A4)
+    y = A4[1] - 50
 
-def _resolve_local_pdf_path(file_name: str) -> str:
-    base_dir = os.getenv("SOLUTION_LOCAL_OUTPUT_DIR", "").strip()
-    if not base_dir:
-        base_dir = os.path.join("outputs", "solution")
-    os.makedirs(base_dir, exist_ok=True)
-    return os.path.abspath(os.path.join(base_dir, file_name))
+    if render_math_as_plain:
+        for entry in data.get("entries", []):
+            if entry.get("original"): entry["original"] = latex_to_unicode_shared(entry["original"])
+            if entry.get("explanation"): entry["explanation"] = latex_to_unicode_shared(entry["explanation"])
+            if entry.get("answer"): entry["answer"] = latex_to_unicode_shared(entry["answer"])
 
+    c.setFont(font_name, 18); c.drawCentredString(A4[0]/2, y, "해 설 지"); y -= 40
+    for entry in data.get("entries", []):
+        if y < 150: c.showPage(); y = A4[1]-50
+        c.setFont(font_name, 12); c.setFillColorRGB(0.2, 0.3, 0.5)
+        prob_label = f"문제 {entry.get('number') or ''}"
+        c.drawString(50, y, f"{prob_label} {entry.get('title', '')}")
+        y -= 25
+        if include_original and entry.get("original"):
+            draw_text(entry["original"], size=10, gap=5, indent=10, color=(0.3, 0.3, 0.3))
+            y -= 10
+        draw_text(f"정답: {entry.get('answer', '-')}", size=11, gap=8, indent=0, color=(0.8, 0, 0))
+        draw_text("해설:", size=11, gap=5, indent=0, color=(0, 0, 0))
+        draw_text(entry.get("explanation", ""), size=11, gap=5, indent=5, color=(0, 0, 0))
+        y -= 25
+        c.line(50, y+10, A4[0]-50, y+10); y -= 20
+    
+    c.save()
+    print(f"PDF_PATH: {output_path}")
+    print(f"PDF_SIZE: {os.path.getsize(output_path)}")
 
-def _merge_local_font_env(
-    envs: dict[str, str] | None,
-    *,
-    pdf_path: str,
-) -> dict[str, str] | None:
-    if envs is None:
-        envs = {}
-    if envs.get("SOLUTION_FONT_PATH") or os.getenv("SOLUTION_FONT_PATH"):
-        return envs
-    font_dir = os.path.dirname(pdf_path) or os.getcwd()
-    font_path = os.path.join(font_dir, "NotoSansKR-Regular.ttf")
-    merged = dict(envs)
-    merged["SOLUTION_FONT_PATH"] = font_path
-    return merged
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
+"""
 
+def _build_pdf_code(payload: Dict[str, Any]) -> str:
+    """PDF 생성용 파이썬 코드 생성"""
+    payload_json = json.dumps(payload)
+    payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("utf-8")
+    code = template.replace("{{PAYLOAD}}", payload_b64)
+    return code
 
-def _execute_pdf_locally(
-    pdf_code: str,
-    envs: dict[str, str] | None = None,
-) -> Tuple[bool, List[str], List[str], Optional[Exception]]:
-    stdout_buffer = io.StringIO()
-    stderr_buffer = io.StringIO()
+def _extract_pdf_meta(stdout_lines: List[str]) -> Tuple[Optional[str], Optional[str], Optional[int], Optional[str], Optional[str], Optional[str], Optional[bool]]:
+    """stdout 출력에서 PDF 메타데이터 추출"""
+    pdf_path, pdf_name, pdf_size, pdf_base64, pdf_font, pdf_font_path, pdf_font_loaded = None, None, None, None, None, None, None
+    for line in stdout_lines:
+        if line.startswith("PDF_PATH:"): pdf_path = line.split(":", 1)[1].strip()
+        elif line.startswith("PDF_NAME:"): pdf_name = line.split(":", 1)[1].strip()
+        elif line.startswith("PDF_SIZE:"):
+            try: pdf_size = int(line.split(":", 1)[1].strip())
+            except: pass
+        elif line.startswith("PDF_BASE64:"): pdf_base64 = line.split(":", 1)[1].strip()
+        elif line.startswith("PDF_FONT:"): pdf_font = line.split(":", 1)[1].strip()
+        elif line.startswith("PDF_FONT_PATH:"): pdf_font_path = line.split(":", 1)[1].strip()
+        elif line.startswith("PDF_FONT_LOADED:"): pdf_font_loaded = line.split(":", 1)[1].strip().lower() == "true"
+    return pdf_path, pdf_name, pdf_size, pdf_base64, pdf_font, pdf_font_path, pdf_font_loaded
+
+def _resolve_local_pdf_path(pdf_file_name: str) -> str:
+    """로컬 PDF 저장 경로 결정"""
+    output_dir = os.path.join(os.getcwd(), "outputs", "solution")
+    os.makedirs(output_dir, exist_ok=True)
+    return os.path.join(output_dir, pdf_file_name)
+
+def _merge_local_font_env(envs: Optional[dict], pdf_path: str) -> dict:
+    return dict(envs or {})
+
+def _execute_pdf_locally(code: str, envs: dict) -> Tuple[bool, List[str], List[str], Optional[Exception]]:
+    """로컬에서 PDF 생성 코드 실행"""
+    temp_file = None
     try:
-        with _temporary_env(envs), redirect_stdout(stdout_buffer), redirect_stderr(
-            stderr_buffer
-        ):
-            exec(pdf_code, {"__name__": "__main__"})
-        stdout_lines = stdout_buffer.getvalue().splitlines()
-        stderr_lines = stderr_buffer.getvalue().splitlines()
-        return True, stdout_lines, stderr_lines, None
-    except Exception as exc:
-        if stderr_buffer.tell():
-            stderr_buffer.write("\n")
-        stderr_buffer.write(f"{type(exc).__name__}: {exc}")
-        stdout_lines = stdout_buffer.getvalue().splitlines()
-        stderr_lines = stderr_buffer.getvalue().splitlines()
-        return False, stdout_lines, stderr_lines, exc
-
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+            f.write(code)
+            temp_file = f.name
+        
+        # [구조 개선] 바이너리 모드로 실행하여 인코딩 오류 원천 차단
+        result = subprocess.run(
+            [sys.executable, temp_file],
+            env={**os.environ, **envs},
+            capture_output=True,
+            text=False
+        )
+        
+        # 부모 프로세스에서 안전하게 디코딩 수행
+        stdout_lines = result.stdout.decode("utf-8", errors="ignore").splitlines()
+        stderr_lines = result.stderr.decode("utf-8", errors="ignore").splitlines()
+        
+        ok = result.returncode == 0
+        return ok, stdout_lines, stderr_lines, None
+    except Exception as e:
+        return False, [], [], e
+    finally:
+        if temp_file and os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except:
+                pass
