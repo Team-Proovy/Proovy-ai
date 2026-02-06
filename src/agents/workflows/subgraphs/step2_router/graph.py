@@ -61,6 +61,14 @@ SOLUTION_KEYWORDS = (
     "pdf로 저장해줘",
 )
 SOLVE_KEYWORDS = ("해설해줘", "풀이해줘", "설명해줘", "풀어줘")
+SOLVE_ALL_KEYWORDS = ("다 풀어줘", "전부", "모두", "전부 해설", "모두 풀어줘", "다 해설", "한꺼번에")
+
+
+def _detect_solve_all_intent(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(keyword.lower() in lowered for keyword in SOLVE_ALL_KEYWORDS)
 
 
 def _has_solution_intent(text: str) -> bool:
@@ -235,13 +243,25 @@ def intent(state: AgentState) -> AgentState:
     """
     print("---ROUTER: INTENT DETECTION---")
     latest_question, ocr_full_text, combined_question = _collect_user_context(state)
+
+    # 이미 chunks가 있더라도, 1개뿐이라면 텍스트 분석을 통해 더 쪼개봅니다.
+    from agents.workflows.subgraphs.step4_features.solution.problem_utils import split_text_into_problems
+    current_chunks = state.get("solution_chunks") or []
+    if len(current_chunks) <= 1 and combined_question:
+        new_chunks = split_text_into_problems(combined_question)
+        if len(new_chunks) > 1:
+            state["solution_chunks"] = new_chunks
+            print(f"---ROUTER: RE-SPLIT INTO {len(new_chunks)} PROBLEMS---")
+
     chosen = _extract_chosen_features(state)
     if "Solution" in chosen or _has_solution_intent(combined_question):
         state["simple_response"] = False
+        state["solve_all"] = _detect_solve_all_intent(combined_question)
         state["prev_action"] = "Intent"
         return state
 
     if combined_question:
+        state["solve_all"] = _detect_solve_all_intent(combined_question)
         classifier = get_model(OpenRouterModelName.GPT_5_MINI)
         classifier = classifier.with_config(tags=["skip_stream"])
         system_prompt = (
@@ -299,6 +319,16 @@ def intent_route(state: AgentState) -> Literal["Planner", "Executor"]:
         return "Planner"
 
     _, _, combined_question = _collect_user_context(state)
+
+    # [보강] 라우팅 직전에도 한 번 더 문제를 쪼개서 chunks를 확보합니다.
+    from agents.workflows.subgraphs.step4_features.solution.problem_utils import split_text_into_problems
+    current_chunks = state.get("solution_chunks") or []
+    if len(current_chunks) <= 1 and combined_question:
+        new_chunks = split_text_into_problems(combined_question)
+        if len(new_chunks) > 1:
+            state["solution_chunks"] = new_chunks
+            print(f"---ROUTER: DYNAMIC RE-SPLIT ({len(new_chunks)} problems)---")
+
     if _has_solution_intent(combined_question):
         state["plan"] = ["Solution"]
         return "Executor"

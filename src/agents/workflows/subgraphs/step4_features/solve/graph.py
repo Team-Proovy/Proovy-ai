@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import List
 
 from langgraph.graph import END, StateGraph
@@ -40,14 +41,25 @@ def analyze_problem(state: AgentState) -> AgentState:
     solve_result = _ensure_solve_result(state)
     user_text = recent_user_context(state)
     ocr_text = extract_ocr_text(state)
+    
+    # 이미 풀린 문제가 있다면 다음 문제부터 분석하도록 가이드
+    last_idx = state.get("last_solved_index")
+    chunks = state.get("solution_chunks") or []
+    
+    target_problem_context = ""
+    if last_idx is not None and chunks and (last_idx + 1) < len(chunks):
+        next_problem = chunks[last_idx + 1]
+        target_problem_context = f"\n[IMPORTANT] Next target problem to solve (0-based index {last_idx + 1}):\n{next_problem}\n"
+        
     analysis_prompt = f"""
 User input (may be Korean or English):
 {user_text or "N/A"}
 
 OCR extracted text (if any):
 {ocr_text or "N/A"}
-
-Task: Analyze only the first explicit STEM problem you can find and respond in English.
+{target_problem_context}
+Task: Analyze ONLY the target problem provided above (or the first explicit STEM problem if no target is provided). 
+Do NOT solve or analyze multiple problems at once. Respond in English.
 """.strip()
 
     system_prompt = (
@@ -320,6 +332,15 @@ def execute_strategy(state: AgentState) -> AgentState:
         "summary": final_summary,
     }
     state["final_output"] = final_output
+
+    # 마지막으로 풀린 문제 인덱스 업데이트 (역행 방지 및 메타데이터 기록)
+    last_idx = state.get("last_solved_index")
+    current_idx = (last_idx if last_idx is not None else -1) + 1
+    
+    if last_idx is None or current_idx > last_idx:
+        state["last_solved_index"] = current_idx
+        state["last_solved_index_ts"] = int(time.time() * 1000)
+        state["last_solved_index_source"] = "Solve"
 
     state["solve_result"] = solve_result
     state["prev_action"] = "Solve_Computation"

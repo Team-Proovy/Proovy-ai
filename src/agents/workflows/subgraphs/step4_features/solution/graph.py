@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import time
 from typing import Any, List, Optional, Tuple
 
 from langgraph.graph import END, StateGraph
@@ -29,10 +30,11 @@ from .problem_utils import (
     _build_pdf_entries,
     _collect_problems,
     _render_latex_to_plain,
+    extract_problem_number,
 )
 
 
-CHUNK_SIZE_DEFAULT = 5
+CHUNK_SIZE_DEFAULT = 1
 SOLUTION_JSON_EXAMPLE = '{"explanations":["해설1","해설2"],"chunk_summary":"요약"}'
 
 
@@ -185,8 +187,15 @@ def solution(state: AgentState) -> AgentState:
     state["solution_chunks"] = problems
 
     total_problems = len(problems)
-    chunk_size = int(progress.chunk_size or CHUNK_SIZE_DEFAULT)
-    total_chunks = math.ceil(total_problems / chunk_size) if total_problems else 0
+    
+    # 사용자가 '전부'를 원하면 전체 개수로, 아니면 기본값(1)으로 설정
+    solve_all = state.get("solve_all", False)
+    if solve_all:
+        chunk_size = total_problems
+    else:
+        chunk_size = int(progress.chunk_size or CHUNK_SIZE_DEFAULT)
+        
+    total_chunks = math.ceil(total_problems / chunk_size) if total_problems and chunk_size else 0
 
     progress.total_problems = total_problems
     progress.total_chunks = total_chunks
@@ -212,6 +221,13 @@ def solution(state: AgentState) -> AgentState:
     explanations = _align_explanations_to_problems(chunk_problems, explanations)
 
     solution_result.guide = chunk_summary or solution_result.guide or "해설을 생성했습니다."
+    
+    # [개선] 현재 몇 번 문제를 풀었는지 가이드에 명시
+    if chunk_problems:
+        current_num = extract_problem_number(chunk_problems[0])
+        if current_num:
+            solution_result.guide = f"{current_num}번 문제의 해설을 완료했습니다. {solution_result.guide}"
+            
     solution_result.chunk_index = current_chunk_index + 1
     solution_result.chunk_size = chunk_size
     solution_result.total_problems = total_problems
@@ -219,6 +235,15 @@ def solution(state: AgentState) -> AgentState:
     solution_result.problems = chunk_problems
     solution_result.explanations = explanations
     solution_result.chunk_summary = chunk_summary
+
+    # [개선] 안전한 전역 인덱스 업데이트 (역행 방지 및 메타데이터 기록)
+    if chunk_problems:
+        new_idx = end - 1
+        old_idx = state.get("last_solved_index")
+        if old_idx is None or new_idx > old_idx:
+            state["last_solved_index"] = new_idx
+            state["last_solved_index_ts"] = int(time.time() * 1000)
+            state["last_solved_index_source"] = "Solution"
 
     pdf_file_name = f"solution_chunk_{solution_result.chunk_index}.pdf"
     emit_base64 = os.getenv("SOLUTION_EMIT_PDF_BASE64") == "1"
@@ -511,11 +536,21 @@ def solution(state: AgentState) -> AgentState:
     if emit_base64:
         final_output["solution"]["pdf_base64"] = tool_outputs.get("solution_pdf", {}).get("pdf_base64")
     if not progress.done:
-        next_batch = min(chunk_size, remaining_count) if remaining_count else chunk_size
+        remaining_problems = problems[end:]
+        next_problem_text = remaining_problems[0] if remaining_problems else None
+        next_num = extract_problem_number(next_problem_text) if next_problem_text else None
+        
+        suggestion_text = f"다음 {next_num}번 문제도 풀어드릴까요?" if next_num else f"다음 {len(remaining_problems)}문제도 풀어드릴까요?"
+        if not next_num and len(remaining_problems) == 1:
+            suggestion_text = "다음 문제도 풀어드릴까요?"
+
         final_output["solution"]["suggestions"] = [
-            f"다음 {next_batch}문제도 풀어드릴까요?",
+            suggestion_text,
             "전체 요약본이 필요하신가요?",
         ]
+        if len(remaining_problems) > 1:
+            final_output["solution"]["suggestions"].insert(1, f"남은 {len(remaining_problems)}문제 모두 풀기")
+            
     state["final_output"] = final_output
     state["solution_result"] = solution_result
     state["prev_action"] = "Solution"

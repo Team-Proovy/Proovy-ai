@@ -11,8 +11,10 @@ from .pdf_utils import (
     latex_to_unicode_shared as _render_latex_to_plain
 )
 
-# 정규식 패턴 강화
-PROBLEM_MARKER_PATTERN = re.compile(r"(?m)^\s*(?:문제\s*)?(\d{1,3})[\.\)]")
+# 정규식 패턴 강화: 문제 1, (1), Q1, No.1, [1] 등 다양한 형식 지원
+PROBLEM_MARKER_PATTERN = re.compile(
+    r"(?mi)^\s*(?:문제|Q|No|Task|Step|\[|#)?\s*(\d{1,3})[\.\)\]]?"
+)
 CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 CIRCLED_NUMBER_MAP = {ch: idx + 1 for idx, ch in enumerate(CIRCLED_NUMBERS)}
 CIRCLED_NUMBER_MAP.update({str(i): i for i in range(1, 101)})
@@ -40,13 +42,54 @@ def _normalize_for_compare(text: str) -> str:
     t = re.sub(r"[^0-9a-zA-Z가-힣]", "", t)
     return t.lower()
 
-def _extract_problem_number(text: str) -> Optional[int]:
+def extract_problem_number(text: str) -> Optional[int]:
+    """텍스트에서 문제 번호를 추출합니다. (캐싱 고려 가능)"""
+    if not text: return None
     clean_t = _global_clean(text)
+    
+    # 1. 정규식 패턴 매칭 (문제 1, (1), Q1 등)
     match = PROBLEM_MARKER_PATTERN.search(clean_t)
-    if not match: match = re.search(r"([①-⑳])", clean_t)
-    if not match: return None
-    val = match.group(1)
-    return int(val) if val.isdigit() else CIRCLED_NUMBER_MAP.get(val)
+    if match:
+        val = match.group(1)
+        if val.isdigit():
+            return int(val)
+            
+    # 2. 원문 숫자 (① 등) 매칭
+    circle_match = re.search(r"([①-⑳])", clean_t)
+    if circle_match:
+        return CIRCLED_NUMBER_MAP.get(circle_match.group(1))
+        
+    return None
+
+def split_text_into_problems(text: str) -> List[str]:
+    """텍스트 내의 문제 마커(문제 1, Q2 등)를 기준으로 텍스트를 분할합니다."""
+    if not text:
+        return []
+
+    # 마커를 기준으로 분할 (마커 자체를 유지하기 위해 캡처 그룹 사용)
+    pattern = re.compile(
+        r"((?:문제|Q|No|Task|Step|\[|#)\s*\d{1,3}[\.\)\]]?)", re.IGNORECASE | re.MULTILINE
+    )
+    parts = pattern.split(text)
+
+    problems = []
+    # 첫 번째 파트(첫 번째 마커 전의 텍스트) 처리
+    first_part = parts[0].strip()
+    if first_part:
+        # 만약 첫 번째 파트가 너무 짧거나 의미 없는 명령문("문제 풀어줘" 등)이면 제외 고려 가능
+        if len(first_part) > 2:
+            problems.append(first_part)
+
+    # 마커와 그 뒤의 내용을 합침
+    for i in range(1, len(parts), 2):
+        marker = parts[i]
+        content = parts[i + 1] if i + 1 < len(parts) else ""
+        combined = (marker + content).strip()
+        if combined:
+            problems.append(combined)
+
+    return [p for p in problems if p]
+
 
 def _block_text(block: Any) -> str:
     if isinstance(block, dict):
@@ -92,7 +135,7 @@ def _collect_problems(state: AgentState) -> List[str]:
             text = _block_text(block)
             if not text: continue
             
-            num = _extract_problem_number(text)
+            num = extract_problem_number(text)
             target_num = num if num else last_num
             
             if target_num is not None:
@@ -130,6 +173,9 @@ def _collect_problems(state: AgentState) -> List[str]:
                 problems_map[first_key] = header_text_list + problems_map[first_key]
             else:
                 problems_map[0] = header_text_list
+        else:
+            # 헤더 미포함 시에도 최소한 데이터는 유지 (0번 키에 그대로 둠)
+            pass
 
     sorted_keys = sorted(problems_map.keys())
     return ["\n".join(problems_map[k]).strip() for k in sorted_keys]
@@ -156,7 +202,7 @@ def _build_pdf_entries(problems, explanations):
     ANS_RE = re.compile(r"(?:정답|답)[\s:：]*([①-⑳A-E0-9\(\)/ㄱㄴㄷㄹㅁ\+\-\.\*]+)")
     
     for p, e in zip(problems, explanations):
-        num = _extract_problem_number(p)
+        num = extract_problem_number(p)
         e_clean = _global_clean(e)
         
         ans_match = ANS_RE.search(e_clean)
