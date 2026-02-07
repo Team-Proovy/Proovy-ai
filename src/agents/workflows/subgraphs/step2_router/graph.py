@@ -359,22 +359,30 @@ def intent_route(state: AgentState) -> Literal["Planner", "Executor"]:
     if len(chosen) > 1:
         return "Planner"
 
-    _, _, combined_question = _collect_user_context(state)
+    latest_question, _, combined_question = _collect_user_context(state)
 
     current_chunks = state.get("solution_chunks") or []
     target_num = state.get("target_problem_number")
     last_idx = state.get("last_solved_index")
 
-    # [개선] 2. 특정 문제를 지칭했거나, 이미 풀이 루프 안에 있다면 Planner를 건너뛰고 Executor로 직행
-    if target_num is not None or last_idx is not None:
-        state["plan"] = ["Solve"]
-        print(f"---ROUTER: CONTINUING LOOP OR TARGETING -> GO TO EXECUTOR---")
-        return "Executor"
-
+    # [수정] 1. 명시적인 해설지(PDF) 생성 의도를 최우선으로 체크하여 라우팅 블락 방지
     if _has_solution_intent(combined_question):
         state["plan"] = ["Solution"]
         return "Executor"
-        
+
+    # [수정] 2. 특정 번호 타겟팅이 있거나, 명확한 풀이 의도가 있는 경우 Solve로 직행
+    # last_idx가 있을 때는 사용자의 답변이 긍정적(다음, 응 등)일 때만 루프를 이어감
+    is_solve_request = _has_solve_intent(latest_question) or target_num is not None
+    
+    # 루프 진행 중 긍정 응답 체크 (latest_question 기준)
+    CONTINUE_KEYWORDS = ("다음", "계속", "이어서", "응", "그래", "ok", "yes")
+    is_continue_request = last_idx is not None and any(k in latest_question.lower() for k in CONTINUE_KEYWORDS)
+
+    if is_solve_request or is_continue_request:
+        state["plan"] = ["Solve"]
+        print(f"---ROUTER: SOLVE OR CONTINUE DETECTED -> GO TO EXECUTOR---")
+        return "Executor"
+
     # [개선] 3. 다중 문제 대응 및 라우팅 로직 고도화
     # 문제가 여러 개이고 처음 시작하는 복합 의도일 때만 Planner로 이동
     if len(current_chunks) > 1 or _is_complex_intent(combined_question):
