@@ -16,6 +16,9 @@ from agents.state import (
     SolveStrategy,
 )
 from agents.tools import E2BExecutionError, run_python_with_e2b
+from agents.workflows.subgraphs.step4_features.solution.problem_utils import (
+    extract_problem_number,
+)
 from agents.workflows.utils import (
     call_model,
     ensure_str_list,
@@ -24,6 +27,49 @@ from agents.workflows.utils import (
     safe_json_loads,
 )
 from schema.models import OpenRouterModelName
+
+
+def _update_last_solved_index(state: AgentState, source: str):
+    """마지막으로 풀린 문제의 인덱스를 지능적으로 업데이트."""
+    last_idx = state.get("last_solved_index")
+    chunks = state.get("solution_chunks") or []
+    solve_result = state.get("solve_result")
+    target_num = state.get("target_problem_number")
+
+    new_idx = None
+
+    # 1) Solve 결과 본문에서 번호를 추출하여 매칭 성공 시
+    if solve_result and getattr(solve_result, "problem", None) and chunks:
+        solved_num = extract_problem_number(solve_result.problem)
+        if solved_num:
+            for i, chunk in enumerate(chunks):
+                if extract_problem_number(chunk) == solved_num:
+                    new_idx = i
+                    break
+
+    # 2) 1번이 실패했지만, 명시적 타겟 번호가 청크와 매칭되는 경우
+    if new_idx is None and target_num is not None:
+        for i, chunk in enumerate(chunks):
+            if extract_problem_number(chunk) == target_num:
+                new_idx = i
+                break
+
+    # 3) 최후의 수단: 텍스트 포함 여부로 매칭 
+    if new_idx is None:
+        candidate = (last_idx if last_idx is not None else -1) + 1
+        if 0 <= candidate < len(chunks) and solve_result and solve_result.problem:
+            if solve_result.problem.strip() in chunks[candidate] or chunks[candidate] in solve_result.problem.strip():
+                new_idx = candidate
+
+    # 확실한 매핑이 발견된 경우에만 업데이트
+    if new_idx is not None:
+        if last_idx is None or new_idx > last_idx:
+            state["last_solved_index"] = new_idx
+            state["last_solved_index_ts"] = int(time.time() * 1000)
+            state["last_solved_index_source"] = source
+            print(f"---FEATURE: SOLVE / INDEX UPDATED TO {new_idx} (Source: {source})---")
+    else:
+        print("---FEATURE: SOLVE / INDEX NOT UPDATED (no reliable mapping found)---")
 
 
 def _ensure_solve_result(state: AgentState) -> SolveResult:
@@ -42,15 +88,38 @@ def analyze_problem(state: AgentState) -> AgentState:
     user_text = recent_user_context(state)
     ocr_text = extract_ocr_text(state)
     
-    # 이미 풀린 문제가 있다면 다음 문제부터 분석하도록 가이드
+    # [개선] 타겟 문제 혹은 다음 문제 결정 로직
     last_idx = state.get("last_solved_index")
     chunks = state.get("solution_chunks") or []
+    target_num = state.get("target_problem_number")
     
     target_problem_context = ""
-    if last_idx is not None and chunks and (last_idx + 1) < len(chunks):
-        next_problem = chunks[last_idx + 1]
-        target_problem_context = f"\n[IMPORTANT] Next target problem to solve (0-based index {last_idx + 1}):\n{next_problem}\n"
+    target_found_idx = None
+
+    # 1. 사용자가 특정 번호를 요청한 경우 (target_problem_number 우선)
+    if target_num is not None and chunks:
+        for idx, chunk in enumerate(chunks):
+            if extract_problem_number(chunk) == target_num:
+                target_found_idx = idx
+                target_problem_context = f"\n[IMPORTANT] User specifically requested problem {target_num}:\n{chunk}\n"
+                break
         
+        if target_found_idx is None:
+            # 타겟이 지정되었으나 매칭되는 청크를 찾지 못한 경우
+            state["target_problem_not_found"] = target_num
+            print(f"---FEATURE: SOLVE / TARGET {target_num} NOT FOUND IN CHUNKS ---")
+    
+    # 2. 타겟이 없거나 매칭에 성공한 경우(target_found_idx가 있을 때)가 아닐 때만 다음 순서 문제 선택
+    # 즉, 타겟을 못 찾았으면 자동 폴백 하지 않음
+    if not target_problem_context and target_num is None and chunks:
+        next_idx = (last_idx if last_idx is not None else -1) + 1
+        if 0 <= next_idx < len(chunks):
+            next_problem = chunks[next_idx]
+            target_problem_context = f"\n[IMPORTANT] Next target problem to solve (0-based index {next_idx}):\n{next_problem}\n"
+            print(f"---FEATURE: SOLVE / SELECTING NEXT INDEX {next_idx}---")
+        
+    print(f"---ANALYZE DEBUG target_num={target_num} target_found_idx={target_found_idx} has_context={bool(target_problem_context)}---")
+
     analysis_prompt = f"""
 User input (may be Korean or English):
 {user_text or "N/A"}
@@ -58,7 +127,8 @@ User input (may be Korean or English):
 OCR extracted text (if any):
 {ocr_text or "N/A"}
 {target_problem_context}
-Task: Analyze ONLY the target problem provided above (or the first explicit STEM problem if no target is provided). 
+Task: Analyze ONLY the target problem provided above. 
+If no target problem is explicitly marked above, analyze the first explicit STEM problem you find.
 Do NOT solve or analyze multiple problems at once. Respond in English.
 """.strip()
 
@@ -179,6 +249,9 @@ Return JSON with:
             "easy_mode": True,  # 간단한 문제 표시
         }
         state["final_output"] = final_output
+
+        # [개선] 쉬운 문제도 인덱스 업데이트 (지능적 매칭 적용)
+        _update_last_solved_index(state, "Solve(Easy)")
 
     state["tool_outputs"] = tool_outputs
     state["solve_result"] = solve_result
@@ -333,14 +406,8 @@ def execute_strategy(state: AgentState) -> AgentState:
     }
     state["final_output"] = final_output
 
-    # 마지막으로 풀린 문제 인덱스 업데이트 (역행 방지 및 메타데이터 기록)
-    last_idx = state.get("last_solved_index")
-    current_idx = (last_idx if last_idx is not None else -1) + 1
-    
-    if last_idx is None or current_idx > last_idx:
-        state["last_solved_index"] = current_idx
-        state["last_solved_index_ts"] = int(time.time() * 1000)
-        state["last_solved_index_source"] = "Solve"
+    # 마지막으로 풀린 문제 인덱스 업데이트 (지능적 매칭 적용)
+    _update_last_solved_index(state, "Solve")
 
     state["solve_result"] = solve_result
     state["prev_action"] = "Solve_Computation"

@@ -11,10 +11,14 @@ from .pdf_utils import (
     latex_to_unicode_shared as _render_latex_to_plain
 )
 
-# 정규식 패턴 강화: 문제 1, (1), Q1, No.1, [1] 등 다양한 형식 지원
+# 정규식 패턴 강화: 
+# 1. 키워드가 있는 경우 (예: 문제 1, Q1) -> 기호는 옵션
+# 2. 키워드가 없는 경우 -> 기호(. , ) , ])는 필수이며 앞뒤로 공백이나 줄 시작/끝이 있어야 함
+# (?<!\S)는 앞에 공백이 아닌 문자가 오지 않음을 의미(줄 시작 또는 공백)하여 가변 길이 후방 탐색 오류를 방지합니다.
 PROBLEM_MARKER_PATTERN = re.compile(
-    r"(?mi)^\s*(?:문제|Q|No|Task|Step|\[|#)?\s*(\d{1,3})[\.\)\]]?"
+    r"(?i)(?:(?:문제|Q|No|Task|Step|\[|#)\s*\d{1,3}[\.\)\]]?|(?<!\S)\d{1,3}[\.\)\]](?!\S))"
 )
+
 CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 CIRCLED_NUMBER_MAP = {ch: idx + 1 for idx, ch in enumerate(CIRCLED_NUMBERS)}
 CIRCLED_NUMBER_MAP.update({str(i): i for i in range(1, 101)})
@@ -29,32 +33,27 @@ def _global_clean(text: str) -> str:
 def _normalize_for_compare(text: str) -> str:
     """[구조 개선] 텍스트와 LaTeX 모두를 위한 통합 비교 키 생성 함수"""
     if not text: return ""
-    # 1. 원문 정규화 및 원문 숫자 변환
     t = unicodedata.normalize("NFKC", text)
     for circle, num in CIRCLED_NUMBER_MAP.items():
         if not str(circle).isdigit():
             t = t.replace(circle, str(num))
     
-    # 2. LaTeX 명령어 및 서식 명령 제거
     t = re.sub(r"\\[a-zA-Z]+", "", t) 
     
-    # 3. 순수 의미(숫자, 한글, 영문)만 남김
     t = re.sub(r"[^0-9a-zA-Z가-힣]", "", t)
     return t.lower()
 
 def extract_problem_number(text: str) -> Optional[int]:
-    """텍스트에서 문제 번호를 추출합니다. (캐싱 고려 가능)"""
+    """텍스트에서 문제 번호를 추출."""
     if not text: return None
     clean_t = _global_clean(text)
     
-    # 1. 정규식 패턴 매칭 (문제 1, (1), Q1 등)
     match = PROBLEM_MARKER_PATTERN.search(clean_t)
     if match:
-        val = match.group(1)
-        if val.isdigit():
-            return int(val)
+        num_match = re.search(r"\d+", match.group(0))
+        if num_match:
+            return int(num_match.group(0))
             
-    # 2. 원문 숫자 (① 등) 매칭
     circle_match = re.search(r"([①-⑳])", clean_t)
     if circle_match:
         return CIRCLED_NUMBER_MAP.get(circle_match.group(1))
@@ -62,33 +61,36 @@ def extract_problem_number(text: str) -> Optional[int]:
     return None
 
 def split_text_into_problems(text: str) -> List[str]:
-    """텍스트 내의 문제 마커(문제 1, Q2 등)를 기준으로 텍스트를 분할합니다."""
+    """텍스트 내의 문제 마커를 기준으로 텍스트를 분할합니다."""
     if not text:
         return []
 
-    # 마커를 기준으로 분할 (마커 자체를 유지하기 위해 캡처 그룹 사용)
     pattern = re.compile(
-        r"((?:문제|Q|No|Task|Step|\[|#)\s*\d{1,3}[\.\)\]]?)", re.IGNORECASE | re.MULTILINE
+        r"((?:(?:문제|Q|No|Task|Step|\[|#)\s*\d{1,3}[\.\)\]]?|(?<!\S)\d{1,3}[\.\)\]](?!\S)))", re.IGNORECASE
     )
     parts = pattern.split(text)
 
     problems = []
-    # 첫 번째 파트(첫 번째 마커 전의 텍스트) 처리
+    # 첫 번째 파트 처리: 본문이 어느 정도 있는 경우만 추가
     first_part = parts[0].strip()
-    if first_part:
-        # 만약 첫 번째 파트가 너무 짧거나 의미 없는 명령문("문제 풀어줘" 등)이면 제외 고려 가능
-        if len(first_part) > 2:
-            problems.append(first_part)
+    if first_part and len(first_part) > 2:
+        problems.append(first_part)
 
-    # 마커와 그 뒤의 내용을 합침
     for i in range(1, len(parts), 2):
         marker = parts[i]
         content = parts[i + 1] if i + 1 < len(parts) else ""
         combined = (marker + content).strip()
-        if combined:
+        
+        # [핵심 수정] 유령 문제 방지: 
+        # 마커(예: '문제 2.')만 있고 뒤에 본문이 거의 없으면 유효한 문제로 보지 않음
+        if combined and len(combined) > len(marker.strip()) + 2:
             problems.append(combined)
 
-    return [p for p in problems if p]
+    if not problems and text.strip():
+        return [text.strip()]
+
+    # 최종 필터링: 공백 제거 후 최소 5자 이상인 유효한 문제만 반환
+    return [p for p in problems if p and len(p.strip()) > 5]
 
 
 def _block_text(block: Any) -> str:
@@ -113,7 +115,6 @@ def _block_text(block: Any) -> str:
     return t
 
 def _collect_problems(state: AgentState) -> List[str]:
-    # [Fix] Major Null check for file_processing
     file_processing = state.get("file_processing")
     if not file_processing: return []
     
@@ -124,7 +125,6 @@ def _collect_problems(state: AgentState) -> List[str]:
     if not pages: return []
     
     problems_map = {}
-    # [Fix] Critical: Move problem_seen_norms outside the page loop to avoid KeyError
     problem_seen_norms = {} 
     last_num = None
     
@@ -144,7 +144,6 @@ def _collect_problems(state: AgentState) -> List[str]:
                     problem_seen_norms[target_num] = set()
                 
                 norm = _normalize_for_compare(text)
-                # 부분 일치로도 중복 판단 (유사 선지 제거 강화)
                 if norm and any(norm in seen or seen in norm for seen in problem_seen_norms[target_num]):
                     continue
                 
@@ -174,18 +173,17 @@ def _collect_problems(state: AgentState) -> List[str]:
             else:
                 problems_map[0] = header_text_list
         else:
-            # 헤더 미포함 시에도 최소한 데이터는 유지 (0번 키에 그대로 둠)
             pass
 
     sorted_keys = sorted(problems_map.keys())
     return ["\n".join(problems_map[k]).strip() for k in sorted_keys]
 
 def _align_explanations_to_problems(problems, explanations):
-    """[구조 개선] 정렬 단계에서는 단순 매핑만 수행 (표현 변환 개입 금지)"""
+    """[구조 개선] 정렬 단계에서는 단순 매핑만 수행"""
     return [str(e).strip() for e in explanations[:len(problems)]]
 
 def _get_problem_title(text: str) -> str:
-    """문제 본문에서 첫 줄을 추출하여 요약 제목 생성 (표현용이므로 즉시 변환)"""
+    """문제 본문에서 첫 줄을 추출하여 요약 제목 생성"""
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if not lines: return "문제"
     title = re.sub(r'^\d+[\.\)]\s*', '', lines[0])

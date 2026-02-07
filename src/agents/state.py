@@ -148,6 +148,7 @@ class AgentState(TypedDict):
     last_solved_index_ts: NotRequired[int]  # 업데이트 시점 (ms)
     last_solved_index_source: NotRequired[str]  # 업데이트한 노드/기능 이름
     solve_all: NotRequired[bool]  # 모든 문제를 한 번에 풀지 여부
+    target_problem_number: NotRequired[int]  # 사용자가 명시적으로 요청한 문제 번호 (1-based)
     requested_chunk_size: NotRequired[int]  # 사용자가 요청한 한 번에 풀 문제 수
 
     # Agent Writer Layer

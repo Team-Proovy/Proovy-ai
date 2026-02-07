@@ -15,7 +15,8 @@ from agents.workflows.subgraphs.step4_features.solution.problem_utils import ext
 MODEL_NAME = OpenRouterModelName.GPT_5_MINI
 
 
-PII_PATTERN = r"[\w\.-]+@[\w\.-]+\.\w+|010-\d{4}-\d{4}"
+# [개선] PII 정규표현식 미리 컴파일하여 성능 최적화
+PII_REGEX = re.compile(r"[\w\.-]+@[\w\.-]+\.\w+|010-\d{4}-\d{4}")
 
 
 def mask_pii(text: Any) -> Tuple[bool, str]:
@@ -24,8 +25,8 @@ def mask_pii(text: Any) -> Tuple[bool, str]:
         text = str(text or "")
     if not text:
         return False, ""
-    found = bool(re.search(PII_PATTERN, text))
-    masked = re.sub(PII_PATTERN, "[PII]", text)
+    found = bool(PII_REGEX.search(text))
+    masked = PII_REGEX.sub("[PII]", text)
     return found, masked
 
 
@@ -135,11 +136,11 @@ def _solution_next_suggestions(state: Dict[str, Any]) -> List[str]:
                 suggestion_text = f"다음 {next_num}번 문제도 풀어드릴까요?" if next_num else "다음 문제도 풀어드릴까요?"
                 return [suggestion_text, "전체 요약본이 필요하신가요?"]
 
-    return []
+    # [수정] Unreachable Code 제거 및 state 기반 폴백 로직 통합
+    final_output = state.get("final_output", {})
     solution_view = final_output.get("solution") if isinstance(final_output, dict) else None
     if isinstance(solution_view, dict) and solution_view.get("next_chunk_available"):
         remaining = int(solution_view.get("remaining_count") or 0)
-        # solution_view에 chunks 정보가 없을 수 있으므로 fallback
         return [f"다음 {remaining}문제도 풀어드릴까요?", "전체 요약본이 필요하신가요?"]
         
     return []
@@ -412,7 +413,13 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
     last_idx = state.get("last_solved_index")
     chunks = state.get("solution_chunks") or []
     progress_hint = f"현재 전체 {len(chunks)}문제 중 {last_idx + 1}번째 문제까지 풀이 완료." if last_idx is not None else "아직 풀이 시작 전입니다."
-    next_step_hint = f"다음은 {last_idx + 2}번 문제를 풀 차례입니다." if last_idx is not None and (last_idx + 1) < len(chunks) else "모든 문제를 풀었습니다."
+    
+    if last_idx is None:
+        next_step_hint = "첫 번째 문제를 풀 차례입니다." if chunks else "새로운 문제를 풀 차례입니다."
+    elif (last_idx + 1) < len(chunks):
+        next_step_hint = f"다음은 {last_idx + 2}번 문제를 풀 차례입니다."
+    else:
+        next_step_hint = "모든 문제를 풀었습니다."
 
     prompt = [
         SystemMessage(content=SUGGESTION_SYSTEM_PROMPT),
@@ -465,17 +472,22 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
     if final_items:
         bullet_lines = []
         for item in final_items:
-            # [최종 수정] Pydantic 객체, 딕셔너리, 문자열 모두 대응하여 순수 텍스트만 추출
             text_val = ""
-            if hasattr(item, "text"):
+            # item이 SuggestionItem 객체인 경우
+            if hasattr(item, "text") and not isinstance(item, dict):
                 text_val = item.text
+            # item이 딕셔너리인 경우
             elif isinstance(item, dict) and "text" in item:
                 text_val = item["text"]
+            # 그 외 (문자열 등)
             else:
                 text_val = str(item)
-            bullet_lines.append(f"- {text_val}")
+            
+            if text_val:
+                bullet_lines.append(f"- {text_val}")
         
-        ai_message_text = f"{ai_message_text}\n\n**다음 학습 제안:**\n" + "\n".join(bullet_lines)
+        if bullet_lines:
+            ai_message_text = f"{ai_message_text}\n\n**다음 학습 제안:**\n" + "\n".join(bullet_lines)
 
     try:
         ai_message_obj = AIMessage(content=ai_message_text)
@@ -485,6 +497,17 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
     # 진단 정보 기록
     record_diagnostics(state, raw_resp, suggestion_struct is not None, parse_err, duration)
 
+    # [개선] 요청한 타겟 문제가 실제로 해결되었는지 확인 후 클리어
+    target = state.get("target_problem_number")
+    if target is not None:
+        chunks = state.get("solution_chunks") or []
+        for i, chunk in enumerate(chunks):
+            if extract_problem_number(chunk) == target:
+                if state.get("last_solved_index") == i:
+                    state.pop("target_problem_number", None)
+                    print(f"---SUGGESTION: TARGET PROBLEM {target} CLEARED AFTER RESOLUTION---")
+                break
+
     current_final = state.get("final_output") or {}
     updated_final = dict(current_final) if isinstance(current_final, dict) else {"text": str(current_final)}
     
@@ -492,16 +515,18 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
         updated_final["review"] = review_state
     
     updated_final["suggestion_summary"] = summary
-    # [변경] 객체 리스트의 model_dump() 결과 전달
+    # [수정] Pydantic 객체와 문자열/딕셔너리가 섞여 있어도 안전하게 직렬화
     if final_items:
-        updated_final["suggestion_bullets"] = [item.model_dump() for item in final_items]
+        updated_final["suggestion_bullets"] = [
+            item.model_dump() if hasattr(item, "model_dump") else {"text": str(item)} 
+            for item in final_items
+        ]
     
     if suggestion_struct and suggestion_struct.pii_detected:
         updated_final["pii_detected"] = True
         
-    # [추가 보안] AI 응답 텍스트 내 PII 여부 다시 한번 체크 (정규식 방어선)
-    pii_pattern = r"[\w\.-]+@[\w\.-]+\.\w+|010-\d{4}-\d{4}"
-    if re.search(pii_pattern, ai_message_text):
+    # [추가 보안] AI 응답 텍스트 내 PII 여부 다시 한번 체크 (컴파일된 REGEX 사용)
+    if PII_REGEX.search(ai_message_text):
         updated_final["pii_detected"] = True
 
     return {"messages": [ai_message_obj], "final_output": updated_final}

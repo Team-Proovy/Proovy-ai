@@ -11,6 +11,7 @@
 """
 
 import json
+import re
 from typing import Literal, List, Optional
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -71,6 +72,21 @@ def _detect_solve_all_intent(text: str) -> bool:
     return any(keyword.lower() in lowered for keyword in SOLVE_ALL_KEYWORDS)
 
 
+def _detect_target_number(text: str) -> Optional[int]:
+    """사용자 메시지에서 'n번' 혹은 'n번 문제'와 같은 타겟 번호를 추출합니다."""
+    if not text:
+        return None
+    # '2번', '2번 문제', '2번만', 'Q2' 등 패턴 매칭
+    match = re.search(r"(\d+)\s*(?:번|번\s*문제|번만)", text)
+    if match:
+        return int(match.group(1))
+    
+    match_q = re.search(r"(?:Q|No|#)\s*(\d+)", text, re.IGNORECASE)
+    if match_q:
+        return int(match_q.group(1))
+    return None
+
+
 def _has_solution_intent(text: str) -> bool:
     if not text:
         return False
@@ -114,7 +130,19 @@ def _collect_user_context(state: AgentState) -> tuple[str, str, str]:
     if messages:
         last_message: BaseMessage = messages[-1]
         content = getattr(last_message, "content", "")
-        latest_question = content.strip() if isinstance(content, str) else ""
+        
+        # [치명적 에러 방지] content가 list(Multimodal)일 경우 대응
+        if isinstance(content, str):
+            latest_question = content.strip()
+        elif isinstance(content, list):
+            text_parts = [
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            ]
+            latest_question = "\n".join(text_parts).strip()
+        else:
+            latest_question = str(content or "").strip()
 
     ocr_full_text = extract_ocr_text(state)
 
@@ -244,16 +272,29 @@ def intent(state: AgentState) -> AgentState:
     print("---ROUTER: INTENT DETECTION---")
     latest_question, ocr_full_text, combined_question = _collect_user_context(state)
 
-    # 이미 chunks가 있더라도, 1개뿐이라면 텍스트 분석을 통해 더 쪼개봅니다.
+    # [개선] 1. 문제 분할의 멱등성(Idempotency) 보장
+    # 이미 충분한 문제(chunks)가 확보되었다면, 새로운 맥락이 아닌 한 재분할을 피합니다.
     from agents.workflows.subgraphs.step4_features.solution.problem_utils import split_text_into_problems
+    
     current_chunks = state.get("solution_chunks") or []
-    if len(current_chunks) <= 1 and combined_question:
-        new_chunks = split_text_into_problems(combined_question)
-        if len(new_chunks) > 1:
-            state["solution_chunks"] = new_chunks
-            print(f"---ROUTER: RE-SPLIT INTO {len(new_chunks)} PROBLEMS---")
+    is_new_context = not current_chunks # 처음 시작하거나 chunks가 비어있는 경우
+    
+    if is_new_context and combined_question:
+        # [최종 개선] 입력 텍스트의 앞뒤 공백을 제거하여 마지막 유령 청크 생성을 원천 차단합니다.
+        new_chunks = split_text_into_problems(combined_question.strip())
+        if len(new_chunks) > 0:
+            state["solution_chunks"] = list(new_chunks)
+            print(f"---ROUTER: INITIAL PROBLEM SPLIT ({len(new_chunks)} problems)---")
 
     chosen = _extract_chosen_features(state)
+    
+    target_num = _detect_target_number(combined_question)
+    if target_num:
+        state["target_problem_number"] = target_num
+        print(f"---ROUTER: TARGET PROBLEM DETECTED: {target_num}---")
+    
+    print(f"---ROUTER DEBUG target_num={target_num} chunks_count={len(state.get('solution_chunks') or [])}---")
+
     if "Solution" in chosen or _has_solution_intent(combined_question):
         state["simple_response"] = False
         state["solve_all"] = _detect_solve_all_intent(combined_question)
@@ -285,7 +326,7 @@ def intent(state: AgentState) -> AgentState:
             verdict = getattr(ai_message, "content", "")
             normalized = (verdict or "").strip().upper()
             is_stem = normalized.startswith("STEM")
-        except Exception as exc:  # pragma: no cover - defensive logging
+        except Exception as exc: 
             print(f"---ROUTER: STEM CLASSIFIER ERROR {exc!r}---")
             is_stem = True
 
@@ -320,24 +361,29 @@ def intent_route(state: AgentState) -> Literal["Planner", "Executor"]:
 
     _, _, combined_question = _collect_user_context(state)
 
-    # [보강] 라우팅 직전에도 한 번 더 문제를 쪼개서 chunks를 확보합니다.
-    from agents.workflows.subgraphs.step4_features.solution.problem_utils import split_text_into_problems
     current_chunks = state.get("solution_chunks") or []
-    if len(current_chunks) <= 1 and combined_question:
-        new_chunks = split_text_into_problems(combined_question)
-        if len(new_chunks) > 1:
-            state["solution_chunks"] = new_chunks
-            print(f"---ROUTER: DYNAMIC RE-SPLIT ({len(new_chunks)} problems)---")
+    target_num = state.get("target_problem_number")
+    last_idx = state.get("last_solved_index")
+
+    # [개선] 2. 특정 문제를 지칭했거나, 이미 풀이 루프 안에 있다면 Planner를 건너뛰고 Executor로 직행
+    if target_num is not None or last_idx is not None:
+        state["plan"] = ["Solve"]
+        print(f"---ROUTER: CONTINUING LOOP OR TARGETING -> GO TO EXECUTOR---")
+        return "Executor"
 
     if _has_solution_intent(combined_question):
         state["plan"] = ["Solution"]
         return "Executor"
+        
+    # [개선] 3. 다중 문제 대응 및 라우팅 로직 고도화
+    # 문제가 여러 개이고 처음 시작하는 복합 의도일 때만 Planner로 이동
+    if len(current_chunks) > 1 or _is_complex_intent(combined_question):
+        print(f"---ROUTER: MULTI-PROBLEM OR COMPLEX INTENT -> GO TO PLANNER---")
+        return "Planner"
+
     if _has_solve_intent(combined_question):
         state["plan"] = ["Solve"]
         return "Executor"
-    requires_planner = _is_complex_intent(combined_question)
-    if requires_planner:
-        return "Planner"
 
     primary_feature = _infer_primary_feature(combined_question) or "Solve"
     state["plan"] = [primary_feature]
