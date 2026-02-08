@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -117,7 +118,8 @@ def _build_solution_prompts(problems: List[str]) -> Tuple[str, str]:
         "The length of explanations MUST equal the number of problems and keep order.\n"
         "Each explanation MUST start with the original problem number.\n"
         "Each explanation MUST include a first line formatted as '정답: ...' "
-        "with the final answer."
+        "with the final answer.\n"
+        "**CRITICAL: Always use LaTeX delimiters ($ ... $) for all mathematical symbols, expressions, and formulas (e.g., $x^2$, $\\sum$, $\\infty$). DO NOT use Unicode math symbols directly.**"
     )
     user_prompt = (
         "다음 문제들에 대한 해설을 작성해 주세요.\n"
@@ -210,18 +212,24 @@ def solution(state: AgentState) -> AgentState:
     tool_outputs = state.setdefault("tool_outputs", {})
     explanations, chunk_summary = _request_explanations(chunk_problems, tool_outputs)
     explanations = _align_explanations_to_problems(chunk_problems, explanations)
+    display_problems = [_render_latex_to_plain(p) for p in chunk_problems]
+    display_explanations = [_render_latex_to_plain(e) for e in explanations]
 
     solution_result.guide = chunk_summary or solution_result.guide or "해설을 생성했습니다."
     solution_result.chunk_index = current_chunk_index + 1
     solution_result.chunk_size = chunk_size
     solution_result.total_problems = total_problems
     solution_result.total_chunks = total_chunks
-    solution_result.problems = chunk_problems
-    solution_result.explanations = explanations
+    solution_result.problems = display_problems
+    solution_result.explanations = display_explanations
     solution_result.chunk_summary = chunk_summary
 
     pdf_file_name = f"solution_chunk_{solution_result.chunk_index}.pdf"
-    emit_base64 = os.getenv("SOLUTION_EMIT_PDF_BASE64") == "1"
+    emit_base64_output = os.getenv("SOLUTION_EMIT_PDF_BASE64") == "1"
+    emit_base64_e2b = (
+        os.getenv("SOLUTION_E2B_EMIT_BASE64", "1").strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
     
     render_latex_enabled = (
         os.getenv("SOLUTION_USE_MATH_RENDER", "0").strip().lower()
@@ -264,7 +272,7 @@ def solution(state: AgentState) -> AgentState:
         "summary": None,
         "pdf_path": f"/home/user/{pdf_file_name}",
         "file_name": pdf_file_name,
-        "emit_base64": emit_base64,
+        "emit_base64": emit_base64_e2b,
         "font_urls": font_urls,
         "font_base64": font_base64,
     }
@@ -278,8 +286,14 @@ def solution(state: AgentState) -> AgentState:
         sandbox_envs["SOLUTION_E2B_INSTALL_DEPS"] = install_deps_env
     
     use_math_render_env = os.getenv("SOLUTION_USE_MATH_RENDER")
-    if use_math_render_env:
-        sandbox_envs["SOLUTION_USE_MATH_RENDER"] = use_math_render_env
+    sandbox_envs["SOLUTION_USE_MATH_RENDER"] = use_math_render_env or "1"
+    render_math_plain_env = os.getenv("SOLUTION_RENDER_MATH_AS_PLAIN")
+    sandbox_envs["SOLUTION_RENDER_MATH_AS_PLAIN"] = render_math_plain_env or "0"
+    svg_render_env = os.getenv("SOLUTION_USE_SVG_RENDER")
+    sandbox_envs["SOLUTION_USE_SVG_RENDER"] = svg_render_env or "1"
+    svg_install_env = os.getenv("SOLUTION_SVG_INSTALL_DEPS")
+    if svg_install_env:
+        sandbox_envs["SOLUTION_SVG_INSTALL_DEPS"] = svg_install_env
 
     install_deps = os.getenv("SOLUTION_E2B_INSTALL_DEPS", "").strip().lower() in {
         "1", "true", "yes", "y", "on",
@@ -358,6 +372,18 @@ def solution(state: AgentState) -> AgentState:
         ) = _extract_pdf_meta(stdout_lines)
         pdf_path = pdf_path or pdf_payload["pdf_path"]
         pdf_name = pdf_name or pdf_file_name
+
+        if pdf_base64:
+            local_pdf_path = _resolve_local_pdf_path(pdf_file_name)
+            try:
+                with open(local_pdf_path, "wb") as handle:
+                    handle.write(base64.b64decode(pdf_base64))
+                pdf_path = local_pdf_path
+                pdf_size = os.path.getsize(local_pdf_path)
+                if not emit_base64_output:
+                    pdf_base64 = None
+            except Exception as exc:
+                stderr_lines.append(f"PDF_LOCAL_SAVE_ERROR: {exc}")
         _record_pdf_success(
             solution_result,
             tool_outputs,
@@ -493,8 +519,8 @@ def solution(state: AgentState) -> AgentState:
         "chunk_size": solution_result.chunk_size,
         "total_problems": solution_result.total_problems,
         "total_chunks": solution_result.total_chunks,
-        "problems": [_render_latex_to_plain(p) for p in solution_result.problems],
-        "explanations": [_render_latex_to_plain(e) for e in solution_result.explanations],
+        "problems": display_problems,
+        "explanations": display_explanations,
         "chunk_summary": solution_result.chunk_summary,
         "pdf_path": solution_result.pdf_path,
         "pdf_file_name": solution_result.pdf_file_name,
@@ -508,7 +534,7 @@ def solution(state: AgentState) -> AgentState:
         final_output["solution"]["pdf_font"] = tool_outputs["solution_pdf"].get("pdf_font")
         final_output["solution"]["pdf_font_path"] = tool_outputs["solution_pdf"].get("pdf_font_path")
         final_output["solution"]["pdf_font_loaded"] = tool_outputs["solution_pdf"].get("pdf_font_loaded")
-    if emit_base64:
+    if emit_base64_output:
         final_output["solution"]["pdf_base64"] = tool_outputs.get("solution_pdf", {}).get("pdf_base64")
     if not progress.done:
         next_batch = min(chunk_size, remaining_count) if remaining_count else chunk_size
