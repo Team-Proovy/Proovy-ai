@@ -139,10 +139,10 @@ async def info() -> ServiceMetadata:
 
 async def _handle_input(
     user_input: UserInput, agent: AgentGraph
-) -> tuple[dict[str, Any], UUID]:
+) -> tuple[dict[str, Any], UUID, str]:
     """
     Parse user input and handle any required interrupt resumption.
-    Returns kwargs for agent invocation and the run_id.
+    Returns kwargs for agent invocation, run_id, and thread_id.
     """
     run_id = uuid4()
     thread_id = user_input.thread_id or str(uuid4())
@@ -205,7 +205,7 @@ async def _handle_input(
         "config": config,
     }
 
-    return kwargs, run_id
+    return kwargs, run_id, thread_id
 
 
 # [중요도: 9/10] 단일 추론 실행 - 핵심 기능, 최종 응답만 반환하는 심플한 요청-응답 패턴
@@ -226,7 +226,7 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
     # you'd want to include it. You could update the API to return a list of ChatMessages
     # in that case.
     agent: AgentGraph = get_agent(agent_id)
-    kwargs, run_id = await _handle_input(user_input, agent)
+    kwargs, run_id, _thread_id = await _handle_input(user_input, agent)
 
     try:
         response_events: list[tuple[str, Any]] = await agent.ainvoke(**kwargs, stream_mode=["updates", "values"])  # type: ignore # fmt: skip
@@ -263,7 +263,16 @@ async def message_generator(
     This is the workhorse method for the /stream endpoint.
     """
     agent: AgentGraph = get_agent(agent_id)
-    kwargs, run_id = await _handle_input(user_input, agent)
+    kwargs, run_id, thread_id = await _handle_input(user_input, agent)
+
+    # 스트리밍 시작 시 thread_id를 포함한 초기 이벤트를 먼저 전송
+    # proovy-server에서 Note.threadId / ChatSession.externalThreadId 저장에 사용
+    thread_id_event = {
+        "type": "thread_id",
+        "thread_id": thread_id,
+        "run_id": str(run_id),
+    }
+    yield f"data: {json.dumps(thread_id_event, ensure_ascii=False)}\n\n"
 
     # 노드별 진행 상태 문구 매핑 (최종 응답 전까지 "~하고 있습니다" 형태로 전달)
     progress_messages: dict[str, str] = {
