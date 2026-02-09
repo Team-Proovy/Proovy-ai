@@ -331,4 +331,5 @@ builder.add_edge("FinalResponse", END)
 
 
 # "agent": "src.agents.workflows.maingraph:graph"
-graph = builder.compile()
+# checkpointer를 주입하기 위해 builder만 export하고, 컴파일은 agents.py에서 수행
+graph_builder = builder

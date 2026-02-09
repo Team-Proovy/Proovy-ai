@@ -95,12 +95,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         # Initialize both checkpointer (for short-term memory) and store (for long-term memory)
         async with initialize_database() as saver, initialize_store() as store:
-            # Set up both components
-            if hasattr(saver, "setup"):  # ignore: union-attr
-                await saver.setup()
-            # Only setup store for Postgres as InMemoryStore doesn't need setup
+            # store 쪽에만 setup 이 필요한 경우 호출 (없으면 무시)
             if hasattr(store, "setup"):  # ignore: union-attr
                 await store.setup()
+
+            # Checkpointer를 agents에 주입 (멀티턴 대화 지원)
+            from agents.agents import set_checkpointer
+
+            set_checkpointer(saver)
+            logger.info("Checkpointer injected into agents")
 
             # Configure agents with both memory components and async loading
             get_all_agent_info()
@@ -172,8 +175,8 @@ async def _handle_input(
         callbacks=callbacks,
     )
 
-    # 현재는 LangGraph checkpointer(메모리)를 붙이지 않았으므로
-    # 상태 조회/인터럽트 재개는 사용하지 않고, 항상 새 메시지로만 호출한다.
+    # thread_id가 있으면 checkpointer가 자동으로 이전 messages를 로드하고,
+    # 여기서 전달한 새 메시지를 추가합니다. (멀티턴 대화 지원)
     input: Command | dict[str, Any]
     input = {"messages": [HumanMessage(content=user_input.message)]}
 
@@ -430,8 +433,9 @@ async def message_generator(
                     # that the model is asking for a tool to be invoked.
                     # So we only print non-empty content.
                     yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)}, ensure_ascii=False)}\n\n"
-    except Exception as e:
-        logger.error(f"Error in message generator: {e}")
+    except Exception:
+        # 전체 스택트레이스를 찍어서 LangGraph 내부 에러 원인까지 추적할 수 있도록 한다.
+        logger.exception("Error in message generator")
         yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'}, ensure_ascii=False)}\n\n"
     finally:
         yield "data: [DONE]\n\n"
