@@ -378,8 +378,12 @@ async def message_generator(
                         else:
                             update_messages = []
 
-                    # 중간 노드의 update_messages는 클라이언트로 전달하지 않기 위해 버린다.
-                    # 최종 응답 노드의 update_messages도 토큰 스트림으로 충분하므로 별도 전송하지 않는다.
+                    # FinalResponse 노드가 partial_responses를 조합한 경우
+                    # LLM 호출 없이 문자열만 합치므로 토큰 스트림이 발생하지 않는다.
+                    # 이 경우 update_messages에 담긴 최종 AIMessage를 직접 전송한다.
+                    if is_final_node(node_path) and update_messages:
+                        new_messages.extend(update_messages)
+                    # 그 외 중간 노드의 update_messages는 클라이언트로 전달하지 않는다.
 
             if stream_mode == "custom":
                 new_messages = [event]
