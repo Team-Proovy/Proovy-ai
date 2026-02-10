@@ -19,6 +19,7 @@ from agents.workflows.utils import (
     call_model,
     ensure_str_list,
     extract_ocr_text,
+    get_conversation_summary,
     recent_user_context,
     safe_json_loads,
 )
@@ -38,20 +39,31 @@ def _ensure_solve_result(state: AgentState) -> SolveResult:
 def analyze_problem(state: AgentState) -> AgentState:
     print("---FEATURE: SOLVE / ANALYSIS---")
     solve_result = _ensure_solve_result(state)
-    user_text = recent_user_context(state)
+    user_text = recent_user_context(state, max_messages=3, include_assistant=True)
     ocr_text = extract_ocr_text(state)
+
+    # 이전 대화 맥락 수집 (멀티턴 지원)
+    conversation_context = get_conversation_summary(state, max_chars=1000)
+
+    # 대화 맥락이 있으면 포함
+    context_section = ""
+    if conversation_context:
+        context_section = f"\n\nPrevious conversation context (for reference if user mentions previous problems):\n{conversation_context}\n"
+
     analysis_prompt = f"""
 User input (may be Korean or English):
 {user_text or "N/A"}
 
 OCR extracted text (if any):
 {ocr_text or "N/A"}
-
+{context_section}
 Task: Analyze only the first explicit STEM problem you can find and respond in English.
+If user refers to a previous problem (e.g., '이전 문제', '방금 푼 문제'), use the conversation context to identify it.
 """.strip()
 
     system_prompt = (
         "You are a STEM problem analyst. Extract only the first explicit problem. "
+        "If the user refers to a previous problem, find it from the conversation context. "
         "Return structured JSON with keys: problem, domain, knowns, unknowns, laws, constraints, hints. "
         "Always produce arrays for multi-valued fields and keep all text in concise English."
     )

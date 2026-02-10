@@ -14,7 +14,7 @@ import json
 from langchain_core.messages import AIMessage
 
 from agents.state import AgentState
-from agents.workflows.utils import call_model
+from agents.workflows.utils import call_model, get_conversation_summary
 from schema.models import OpenRouterModelName
 
 
@@ -96,16 +96,23 @@ def final_response(state: AgentState) -> AgentState:
             else ""
         )
 
+        # 이전 대화 맥락 수집 (멀티턴 대화 지원)
+        conversation_context = get_conversation_summary(state, max_chars=1500)
+
         system_prompt = (
             "너는 수학·과학·프로그래밍 문제를 도와주는 한국어 튜터야. "
             "아래에 주어지는 사용자의 질문과 중간 계산/설명/리뷰 결과를 참고해서 "
             "사용자가 이해하기 쉬운 최종 답변을 한국어로 작성해 줘. "
             "너무 장황하지 않게 핵심 위주로 설명하고, 필요한 경우 2~4단계 정도의 "
-            "간단한 풀이 과정을 포함해 줘."
+            "간단한 풀이 과정을 포함해 줘. "
+            "사용자가 이전 대화를 참조하는 경우(예: '이전 문제', '방금 푼 문제'), "
+            "대화 기록을 참고하여 적절히 답변해 줘."
         )
 
         # 모델에 건네줄 사용자 메시지
         parts: list[str] = []
+        if conversation_context:
+            parts.append(f"[이전 대화 기록]\n{conversation_context}")
         if user_text:
             parts.append(f"[사용자 질문]\n{user_text}")
         if serialized_final:
