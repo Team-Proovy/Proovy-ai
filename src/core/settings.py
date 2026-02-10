@@ -101,11 +101,10 @@ class Settings(BaseSettings):
     SQLITE_DB_PATH: str = "checkpoints.db"
 
     # Local Postgres 설정 (.env의 DB_* 값을 그대로 따름)
-    # HOST/PORT/DB_NAME 는 비교적 민감도가 낮으므로 기본값을 두고,
-    # USERNAME/PASSWORD 는 코드에 하드코딩하지 않고 반드시 .env 에서만 주입받는다.
-    DB_HOST: str = "localhost"
-    DB_PORT: int = 5432
-    DB_NAME: str = "proovy"
+    # 모든 DB 설정은 코드에 하드코딩하지 않고 반드시 .env 에서만 주입받는다.
+    DB_HOST: str | None = None
+    DB_PORT: int | None = None
+    DB_NAME: str | None = None
     DB_USERNAME: str | None = None
     DB_PASSWORD: SecretStr | None = None
 
@@ -118,9 +117,17 @@ class Settings(BaseSettings):
         LangGraph용 접속 URI를 동적으로 생성한다. 실제 자격 증명 값은 .env 에만 존재하고
         코드에는 하드코딩되지 않는다.
         """
-        if not self.DB_USERNAME or not self.DB_PASSWORD:
+        if not all(
+            [
+                self.DB_HOST,
+                self.DB_PORT,
+                self.DB_NAME,
+                self.DB_USERNAME,
+                self.DB_PASSWORD,
+            ]
+        ):
             raise ValueError(
-                "DB_USERNAME and DB_PASSWORD must be set in environment (.env)"
+                "DB_HOST, DB_PORT, DB_NAME, DB_USERNAME and DB_PASSWORD must be set in environment (.env)"
             )
 
         password = (
