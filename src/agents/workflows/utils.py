@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from agents.state import AgentState
 from core.llm import get_model
@@ -32,19 +32,151 @@ def message_to_text(message: BaseMessage) -> str:
     return str(content)
 
 
-def recent_user_context(state: AgentState, *, max_messages: int = 3) -> str:
-    """최근 사용자(human/user) 메시지 몇 개를 이어붙여 컨텍스트 문자열로 만든다."""
+def get_conversation_history(
+    state: AgentState,
+    *,
+    max_turns: int = 5,
+    max_chars_per_message: int = 1000,
+    include_system: bool = False,
+) -> List[BaseMessage]:
+    """LLM에 전달할 대화 히스토리를 LangChain 메시지 리스트로 반환한다.
+
+    checkpointer가 저장한 이전 대화 기록을 활용하여
+    멀티턴 대화의 맥락을 LLM에 전달할 수 있도록 합니다.
+
+    Args:
+        state: 현재 AgentState
+        max_turns: 포함할 최대 대화 턴 수 (user+assistant = 1턴)
+        max_chars_per_message: 메시지당 최대 문자 수
+        include_system: SystemMessage도 포함할지 여부
+
+    Returns:
+        LangChain 메시지 리스트 (HumanMessage, AIMessage 등)
+    """
     messages = state.get("messages") or []
-    user_chunks: List[str] = []
+    result: List[BaseMessage] = []
+    turns_collected = 0
+    last_type = None
+
     for message in reversed(messages):
-        if getattr(message, "type", "") in {"human", "user"}:
+        msg_type = getattr(message, "type", "")
+
+        # 시스템 메시지는 선택적으로 포함
+        if msg_type == "system":
+            if include_system:
+                result.append(message)
+            continue
+
+        # tool 메시지는 건너뜀
+        if msg_type == "tool":
+            continue
+
+        # 유효한 타입만 처리
+        if msg_type not in {"human", "user", "ai", "assistant"}:
+            continue
+
+        # 턴 카운트: user -> assistant 전환 시 1턴
+        is_user = msg_type in {"human", "user"}
+        if last_type is not None:
+            if is_user and last_type in {"ai", "assistant"}:
+                turns_collected += 1
+
+        if turns_collected >= max_turns:
+            break
+
+        # 메시지 텍스트 추출 및 truncate
+        text = message_to_text(message).strip()
+        if not text:
+            continue
+
+        if len(text) > max_chars_per_message:
+            text = text[:max_chars_per_message] + "..."
+
+        # 적절한 메시지 타입으로 변환
+        if is_user:
+            result.append(HumanMessage(content=text))
+        else:
+            result.append(AIMessage(content=text))
+
+        last_type = msg_type
+
+    result.reverse()
+    return result
+
+
+def get_conversation_summary(state: AgentState, *, max_chars: int = 2000) -> str:
+    """대화 히스토리를 간략한 요약 문자열로 반환한다.
+
+    시스템 프롬프트에 대화 맥락을 포함시킬 때 유용합니다.
+    """
+    messages = state.get("messages") or []
+    summary_parts: List[str] = []
+    total_chars = 0
+
+    for message in messages:
+        msg_type = getattr(message, "type", "")
+        if msg_type in {"system", "tool"}:
+            continue
+
+        text = message_to_text(message).strip()
+        if not text:
+            continue
+
+        role = "사용자" if msg_type in {"human", "user"} else "AI"
+        # 긴 메시지는 첫 200자만
+        preview = text[:200] + "..." if len(text) > 200 else text
+        entry = f"{role}: {preview}"
+
+        if total_chars + len(entry) > max_chars:
+            break
+
+        summary_parts.append(entry)
+        total_chars += len(entry)
+
+    return "\n".join(summary_parts)
+
+
+def recent_user_context(
+    state: AgentState,
+    *,
+    max_messages: int = 3,
+    include_assistant: bool = False,
+    max_assistant_chars: int = 500,
+) -> str:
+    """최근 사용자(human/user) 메시지 몇 개를 이어붙여 컨텍스트 문자열로 만든다.
+
+    Args:
+        state: 현재 AgentState
+        max_messages: 수집할 최대 메시지 수
+        include_assistant: True면 AI 응답도 포함하여 대화 맥락 유지
+        max_assistant_chars: AI 응답 포함 시 최대 문자 수 (요약용)
+    """
+    messages = state.get("messages") or []
+    chunks: List[str] = []
+    collected = 0
+
+    for message in reversed(messages):
+        msg_type = getattr(message, "type", "")
+        if msg_type in {"human", "user"}:
             text = message_to_text(message).strip()
             if text:
-                user_chunks.append(text)
-        if len(user_chunks) >= max_messages:
+                chunks.append(f"[사용자]: {text}")
+                collected += 1
+        elif include_assistant and msg_type in {"ai", "assistant"}:
+            text = message_to_text(message).strip()
+            if text:
+                # AI 응답은 길 수 있으므로 요약
+                truncated = text[:max_assistant_chars]
+                if len(text) > max_assistant_chars:
+                    truncated += "..."
+                chunks.append(f"[AI]: {truncated}")
+                collected += 1
+
+        if collected >= max_messages:
             break
-    user_chunks.reverse()
-    return "\n\n".join(user_chunks).strip()
+
+    chunks.reverse()
+    return "\n\n".join(chunks).strip()
 
 
 def extract_ocr_text(state: AgentState) -> str:

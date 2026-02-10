@@ -2,29 +2,57 @@
 
 단일 노드에서 사용자의 마지막 질문을 간단히 풀어 설명하는 용도이다.
 과한 모델/파이프라인을 쓰지 않고, 가벼운 LLM 한 번만 호출한다.
+
+checkpointer가 저장한 대화 히스토리를 활용하여 멀티턴 대화를 지원한다.
 """
 
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState, ExplainResult
-from agents.workflows.utils import call_model, recent_user_context
+from agents.workflows.utils import (
+    call_model,
+    get_conversation_summary,
+    recent_user_context,
+)
 from schema.models import OpenRouterModelName
 
 
 def explain(state: AgentState) -> AgentState:
     print("---FEATURE: EXPLAIN---")
 
-    # 최근 사용자 메시지를 가져온다.
-    user_text = recent_user_context(state, max_messages=1)
+    # 최근 사용자 메시지를 가져온다 (대화 맥락 포함)
+    user_text = recent_user_context(state, max_messages=3, include_assistant=True)
     explain_result = state.get("explain_result") or ExplainResult()
 
+    # 이전 대화 맥락 수집 (멀티턴 지원)
+    conversation_context = get_conversation_summary(state, max_chars=1000)
+
     if user_text:
+        # 대화 맥락이 있으면 시스템 프롬프트에 포함
+        context_info = ""
+        if conversation_context:
+            context_info = (
+                "\n\nConsider the previous conversation context when explaining. "
+                "If user refers to previous problems or topics, use that context."
+            )
+
         system_prompt = (
             "You are a kind Korean tutor. "
             "Explain the given concept or question in very simple Korean, "
             "using short sentences and, if helpful, 1-2 easy examples."
+            f"{context_info}"
         )
-        user_prompt = f"사용자 질문 또는 개념:\n{user_text}\n\n간단하고 이해하기 쉽게 설명해 주세요."
+
+        # 대화 맥락이 있으면 프롬프트에 포함
+        history_section = ""
+        if conversation_context:
+            history_section = f"\n\n[이전 대화 기록]\n{conversation_context}\n"
+
+        user_prompt = (
+            f"{history_section}"
+            f"사용자 질문 또는 개념:\n{user_text}\n\n"
+            "간단하고 이해하기 쉽게 설명해 주세요."
+        )
         explanation = call_model(
             OpenRouterModelName.GPT_5_MINI,
             system_prompt,
