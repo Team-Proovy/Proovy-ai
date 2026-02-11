@@ -40,6 +40,19 @@ def analyze_problem(state: AgentState) -> AgentState:
     solve_result = _ensure_solve_result(state)
     user_text = recent_user_context(state)
     ocr_text = extract_ocr_text(state)
+    indexed_problem_text = ""
+    indexed_problem_number = None
+    problems = state.get("problems") or []
+    if isinstance(problems, list):
+        idx = int(state.get("current_problem_index", 0) or 0)
+        if 0 <= idx < len(problems):
+            item = problems[idx]
+            if isinstance(item, dict):
+                indexed_problem_text = str(item.get("text") or "").strip()
+                indexed_problem_number = item.get("number")
+            else:
+                indexed_problem_text = str(item).strip()
+
     analysis_prompt = f"""
 User input (may be Korean or English):
 {user_text or "N/A"}
@@ -47,7 +60,13 @@ User input (may be Korean or English):
 OCR extracted text (if any):
 {ocr_text or "N/A"}
 
-Task: Analyze only the first explicit STEM problem you can find and respond in English.
+Indexed target problem number:
+{indexed_problem_number if indexed_problem_number is not None else "N/A"}
+
+Indexed target problem text:
+{indexed_problem_text or "N/A"}
+
+Task: If indexed target problem text is provided, analyze that problem first. Otherwise analyze the first explicit STEM problem you can find. Respond in English.
 """.strip()
 
     system_prompt = (
@@ -63,7 +82,11 @@ Task: Analyze only the first explicit STEM problem you can find and respond in E
     )
     payload = safe_json_loads(raw_response)
     problem_statement = (
-        payload.get("problem") or user_text or ocr_text or "문제가 명확하지 않습니다."
+        payload.get("problem")
+        or indexed_problem_text
+        or user_text
+        or ocr_text
+        or "문제가 명확하지 않습니다."
     )
     analysis = ProblemAnalysis(
         problem_statement=str(problem_statement).strip(),

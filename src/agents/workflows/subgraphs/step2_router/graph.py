@@ -17,6 +17,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState
+from agents.workflows.problem_utils import extract_problem_inventory, input_files_fingerprint
 from agents.workflows.utils import extract_ocr_text
 from core.llm import get_model
 from schema.models import OpenRouterModelName
@@ -61,6 +62,15 @@ SOLUTION_KEYWORDS = (
     "pdf로 저장해줘",
 )
 SOLVE_KEYWORDS = ("해설해줘", "풀이해줘", "설명해줘", "풀어줘")
+NEXT_PROBLEM_KEYWORDS = (
+    "다음 문제",
+    "다음문제",
+    "그다음",
+    "이어",
+    "계속",
+    "next",
+)
+NEXT_CONFIRM_WORDS = {"응", "네", "예", "ㅇㅇ", "그래", "좋아", "yes"}
 
 
 def _has_solution_intent(text: str) -> bool:
@@ -78,6 +88,31 @@ def _has_solve_intent(text: str) -> bool:
         return False
     lowered = text.lower()
     return any(keyword.lower() in lowered for keyword in SOLVE_KEYWORDS)
+
+
+def _is_next_problem_request(text: str) -> bool:
+    if not text:
+        return False
+    stripped = text.strip()
+    normalized = stripped.replace(" ", "").lower()
+    if stripped in NEXT_CONFIRM_WORDS or normalized in {w.lower() for w in NEXT_CONFIRM_WORDS}:
+        return True
+    return any(keyword.replace(" ", "").lower() in normalized for keyword in NEXT_PROBLEM_KEYWORDS)
+
+
+def _order_problem_inventory(items: list[dict]) -> list[dict]:
+    """문제 번호가 있으면 번호 오름차순으로 정렬하고, 번호 없는 항목은 뒤로 보낸다."""
+    try:
+        return sorted(
+            items,
+            key=lambda item: (
+                not isinstance(item, dict) or item.get("number") is None,
+                int(item.get("number")) if isinstance(item, dict) and item.get("number") is not None else 10**9,
+            ),
+        )
+    except Exception:
+        # 정렬 실패 시 원본 순서를 유지해 하위 호환성을 보장한다.
+        return items
 
 
 def _normalize_feature_name(raw: Optional[str]) -> Optional[str]:
@@ -235,6 +270,37 @@ def intent(state: AgentState) -> AgentState:
     """
     print("---ROUTER: INTENT DETECTION---")
     latest_question, ocr_full_text, combined_question = _collect_user_context(state)
+
+    # input_files가 바뀐 경우 이전 인벤토리를 폐기한다.
+    current_fingerprint = input_files_fingerprint(state)
+    last_fingerprint = state.get("last_input_hash") or ""
+    if current_fingerprint and current_fingerprint != last_fingerprint:
+        state["last_input_hash"] = current_fingerprint
+        state.pop("problems", None)
+        state.pop("current_problem_index", None)
+
+    # 인벤토리가 없을 때만 1회 생성한다.
+    problems = state.get("problems")
+    if not problems:
+        inventory = extract_problem_inventory(state)
+        if inventory:
+            inventory = _order_problem_inventory(inventory)
+            state["problems"] = inventory
+            state["current_problem_index"] = 0
+            problems = inventory
+
+    # 사용자가 "다음" 요청 시, 인덱스만 올려 Solve로 빠르게 라우팅한다.
+    if _is_next_problem_request(latest_question):
+        indexed_problems = state.get("problems") or []
+        if isinstance(indexed_problems, list):
+            current_index = int(state.get("current_problem_index", 0) or 0)
+            if 0 <= current_index + 1 < len(indexed_problems):
+                state["current_problem_index"] = current_index + 1
+                state["plan"] = ["Solve"]
+                state["simple_response"] = False
+                state["prev_action"] = "Intent"
+                return state
+
     chosen = _extract_chosen_features(state)
     if "Solution" in chosen or _has_solution_intent(combined_question):
         state["simple_response"] = False
