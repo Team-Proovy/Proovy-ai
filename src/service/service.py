@@ -510,29 +510,8 @@ async def message_generator(
         logger.exception("Error in message generator")
         yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'}, ensure_ascii=False)}\n\n"
     finally:
-        # 크레딧 차감 처리 (백그라운드에서 실행)
-        try:
-            # 스트리밍 중 수집된 크레딧 사용 정보를 기반으로 API 호출
-            if credit_usage.get("used_features"):
-                user_id = kwargs.get("config", {}).get("configurable", {}).get("user_id", "")
-                raw_token = getattr(user_input, 'auth_token', None)
-                auth_token = raw_token.get_secret_value() if hasattr(raw_token, 'get_secret_value') else raw_token
-                credit_service = get_credit_service()
-
-                for feature in credit_usage["used_features"]:
-                    try:
-                        await credit_service.use_credit(
-                            user_id=user_id,
-                            feature_name=feature,
-                            difficulty=credit_usage.get("difficulty", "easy"),
-                            token=auth_token,
-                        )
-                        logger.info(f"Credit deducted for feature: {feature}")
-                    except Exception:
-                        logger.exception(f"Failed to deduct credit for {feature}")
-        except Exception:
-            logger.exception("Error during credit deduction")
-
+        # 크레딧 차감은 Spring(proovy-server) doOnComplete()에서 직접 처리.
+        # proovy_ai에서 Spring API를 다시 호출하는 방식은 auth_token 부재로 실패하므로 제거.
         yield "data: [DONE]\n\n"
 
 
