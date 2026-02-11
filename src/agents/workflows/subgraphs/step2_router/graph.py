@@ -135,7 +135,18 @@ def _extract_chosen_features(state: AgentState) -> List[str]:
     return normalized
 
 
-def _collect_user_context(state: AgentState) -> tuple[str, str, str]:
+def _collect_user_context(state: AgentState) -> tuple[str, str, str, str]:
+    """사용자 컨텍스트를 수집합니다.
+
+    Returns:
+        tuple: (latest_question, ocr_full_text, combined, conversation_context)
+        - latest_question: 가장 최근 사용자 질문
+        - ocr_full_text: OCR 추출 텍스트
+        - combined: latest_question + OCR 결합
+        - conversation_context: 이전 대화 맥락 (멀티턴 지원)
+    """
+    from agents.workflows.utils import get_conversation_summary
+
     messages = state.get("messages") or []
     latest_question = ""
     if messages:
@@ -151,7 +162,13 @@ def _collect_user_context(state: AgentState) -> tuple[str, str, str]:
         combined = ocr_full_text
     else:
         combined = latest_question
-    return latest_question, ocr_full_text, combined
+
+    # 이전 대화 맥락 수집 (checkpointer가 저장한 히스토리 활용)
+    conversation_context = ""
+    if len(messages) > 1:
+        conversation_context = get_conversation_summary(state, max_chars=1500)
+
+    return latest_question, ocr_full_text, combined, conversation_context
 
 
 def _is_complex_intent(question: str) -> bool:
@@ -267,9 +284,11 @@ def _generate_plan_with_model(
 def intent(state: AgentState) -> AgentState:
     """사용자 질문의 의도를 파악하고, RAG 호출 필요 여부 등을 결정합니다.
     어떤 경우든 router 그래프는 여기서 종료되고, maingraph가 다음을 결정합니다.
+
+    checkpointer가 저장한 이전 대화 기록을 활용하여 맥락을 유지합니다.
     """
     print("---ROUTER: INTENT DETECTION---")
-    latest_question, ocr_full_text, combined_question = _collect_user_context(state)
+    latest_question, ocr_full_text, combined_question, _ = _collect_user_context(state)
 
     # input_files가 바뀐 경우 이전 인벤토리를 폐기한다.
     current_fingerprint = input_files_fingerprint(state)
@@ -301,6 +320,9 @@ def intent(state: AgentState) -> AgentState:
                 state["prev_action"] = "Intent"
                 return state
 
+    latest_question, ocr_full_text, combined_question, conversation_context = (
+        _collect_user_context(state)
+    )
     chosen = _extract_chosen_features(state)
     if "Solution" in chosen or _has_solution_intent(combined_question):
         state["simple_response"] = False
@@ -310,17 +332,28 @@ def intent(state: AgentState) -> AgentState:
     if combined_question:
         classifier = get_model(OpenRouterModelName.GPT_5_MINI)
         classifier = classifier.with_config(tags=["skip_stream"])
+
+        # 대화 맥락이 있으면 포함하여 더 정확한 분류
+        context_info = ""
+        if conversation_context:
+            context_info = (
+                f"\n\n[Previous conversation context]:\n{conversation_context}\n"
+            )
+
         system_prompt = (
             "You are a strict classifier. "
             "Return only 'STEM' if the user's question is about math, physics, "
             "chemistry, biology, engineering, computer science, or similar STEM subjects. "
+            "Consider the conversation context when classifying - if user refers to previous "
+            "STEM problems (e.g., '이전 문제', '방금 푼 문제'), it should be classified as STEM. "
             "Otherwise return 'NON_STEM'."
         )
         prompt_messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(
                 content=(
-                    "Question:\n"
+                    f"{context_info}"
+                    "Current Question:\n"
                     f"{combined_question}\n\n"
                     "Answer with either STEM or NON_STEM."
                 )
@@ -364,7 +397,7 @@ def intent_route(state: AgentState) -> Literal["Planner", "Executor"]:
     if len(chosen) > 1:
         return "Planner"
 
-    _, _, combined_question = _collect_user_context(state)
+    _, _, combined_question, _ = _collect_user_context(state)
     if _has_solution_intent(combined_question):
         state["plan"] = ["Solution"]
         return "Executor"
@@ -383,7 +416,7 @@ def intent_route(state: AgentState) -> Literal["Planner", "Executor"]:
 def planner(state: AgentState) -> AgentState:
     """복합 의도에 대한 실행 계획을 수립합니다."""
     print("---ROUTER: PLANNING---")
-    _, _, combined_question = _collect_user_context(state)
+    _, _, combined_question, _ = _collect_user_context(state)
     hints = _extract_chosen_features(state)
     plan = _generate_plan_with_model(combined_question, hints)
 
@@ -407,7 +440,7 @@ def executor(state: AgentState) -> AgentState:
     plan = [step for step in (state.get("plan") or []) if step in FEATURE_ACTIONS]
 
     if not plan:
-        _, _, combined_question = _collect_user_context(state)
+        _, _, combined_question, _ = _collect_user_context(state)
         hints = _extract_chosen_features(state)
         fallback = hints[0] if hints else _infer_primary_feature(combined_question)
         plan = [fallback or "Solve"]
