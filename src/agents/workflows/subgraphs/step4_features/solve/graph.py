@@ -18,15 +18,14 @@ from agents.tools import E2BExecutionError, run_python_with_e2b
 from agents.workflows.utils import (
     call_model,
     call_model_by_difficulty,
+    classify_difficulty,
     ensure_str_list,
     extract_ocr_text,
-<<<<<<< HEAD
-    get_difficulty_from_state,
-=======
     get_conversation_summary,
->>>>>>> cf7bf04949b03632090aaef8e08b8bf24ef21ffa
+    get_difficulty_from_state,
     recent_user_context,
     safe_json_loads,
+    set_difficulty_in_state,
 )
 from schema.models import OpenRouterModelName
 
@@ -46,6 +45,14 @@ def analyze_problem(state: AgentState) -> AgentState:
     solve_result = _ensure_solve_result(state)
     user_text = recent_user_context(state, max_messages=3, include_assistant=True)
     ocr_text = extract_ocr_text(state)
+
+    # 난이도 분류 (Solve 단계에서 직접 수행)
+    combined_question = user_text or ""
+    if ocr_text:
+        combined_question = f"{combined_question}\n{ocr_text}".strip()
+    difficulty = classify_difficulty(combined_question)
+    set_difficulty_in_state(state, difficulty)
+    print(f"---SOLVE: DIFFICULTY CLASSIFICATION RESULT {difficulty}---")
 
     # 이전 대화 맥락 수집 (멀티턴 지원)
     conversation_context = get_conversation_summary(state, max_chars=1000)

@@ -1,36 +1,28 @@
 """Explain feature subgraph.
 
 단일 노드에서 사용자의 마지막 질문을 간단히 풀어 설명하는 용도이다.
-<<<<<<< HEAD
 난이도에 따라 적절한 LLM 모델을 선택하여 호출한다.
 
 난이도별 모델:
 - easy: Gemini 2.5 Flash
 - medium: Gemini 3 Flash
 - hard: Gemini 3 Pro
-=======
-과한 모델/파이프라인을 쓰지 않고, 가벼운 LLM 한 번만 호출한다.
 
 checkpointer가 저장한 대화 히스토리를 활용하여 멀티턴 대화를 지원한다.
->>>>>>> cf7bf04949b03632090aaef8e08b8bf24ef21ffa
 """
 
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState, ExplainResult
 from agents.workflows.utils import (
-<<<<<<< HEAD
     call_model_by_difficulty,
+    classify_difficulty,
+    extract_ocr_text,
+    get_conversation_summary,
     get_difficulty_from_state,
     recent_user_context,
+    set_difficulty_in_state,
 )
-=======
-    call_model,
-    get_conversation_summary,
-    recent_user_context,
-)
-from schema.models import OpenRouterModelName
->>>>>>> cf7bf04949b03632090aaef8e08b8bf24ef21ffa
 
 
 def explain(state: AgentState) -> AgentState:
@@ -40,13 +32,17 @@ def explain(state: AgentState) -> AgentState:
     user_text = recent_user_context(state, max_messages=3, include_assistant=True)
     explain_result = state.get("explain_result") or ExplainResult()
 
-<<<<<<< HEAD
-    difficulty = get_difficulty_from_state(state)
-    print(f"→ Explaining with difficulty: {difficulty}")
-=======
+    # 난이도 분류 (Explain 단계에서 직접 수행)
+    ocr_text = extract_ocr_text(state)
+    combined_question = user_text or ""
+    if ocr_text:
+        combined_question = f"{combined_question}\n{ocr_text}".strip()
+    difficulty = classify_difficulty(combined_question)
+    set_difficulty_in_state(state, difficulty)
+    print(f"---EXPLAIN: DIFFICULTY CLASSIFICATION RESULT {difficulty}---")
+
     # 이전 대화 맥락 수집 (멀티턴 지원)
     conversation_context = get_conversation_summary(state, max_chars=1000)
->>>>>>> cf7bf04949b03632090aaef8e08b8bf24ef21ffa
 
     if user_text:
         # 대화 맥락이 있으면 시스템 프롬프트에 포함
@@ -74,15 +70,9 @@ def explain(state: AgentState) -> AgentState:
             f"사용자 질문 또는 개념:\n{user_text}\n\n"
             "간단하고 이해하기 쉽게 설명해 주세요."
         )
-<<<<<<< HEAD
-        user_prompt = f"사용자 질문 또는 개념:\n{user_text}\n\n간단하고 이해하기 쉽게 설명해 주세요."
         # 난이도 기반 모델 사용
         explanation = call_model_by_difficulty(
             state,
-=======
-        explanation = call_model(
-            OpenRouterModelName.GPT_5_MINI,
->>>>>>> cf7bf04949b03632090aaef8e08b8bf24ef21ffa
             system_prompt,
             user_prompt,
         ).strip()

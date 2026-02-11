@@ -16,64 +16,12 @@ from typing import Literal, List, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
-from agents.state import AgentState, CreditState
+from agents.state import AgentState
 from agents.workflows.utils import extract_ocr_text
-from agents.prompts.difficulty_prompts import (
-    DIFFICULTY_CLASSIFIER_SYSTEM_PROMPT,
-    DIFFICULTY_CLASSIFIER_USER_PROMPT,
-    DIFFICULTY_MODEL_MAP,
-    get_model_for_difficulty,
-)
 from core.llm import get_model
 from schema.models import OpenRouterModelName
 
 MAX_RETRIES = 2
-
-
-def _classify_difficulty(question: str) -> Literal["easy", "medium", "hard"]:
-    """
-    문제의 난이도를 분류합니다.
-
-    난이도별 사용 모델:
-    - easy: Gemini 2.5 Flash
-    - medium: Gemini 3 Flash (대부분 여기서 해결)
-    - hard: Gemini 3 Pro (정말 어려운 문제만!)
-
-    Args:
-        question: 문제/질문 텍스트
-
-    Returns:
-        난이도 (easy, medium, hard)
-    """
-    if not question:
-        return "easy"
-
-    # 난이도 분류에는 빠른 모델 사용
-    classifier = get_model(OpenRouterModelName.GEMINI_25_FLASH)
-    classifier = classifier.with_config(tags=["skip_stream"])
-
-    user_prompt = DIFFICULTY_CLASSIFIER_USER_PROMPT.format(
-        problem_text=question[:2000]
-    )
-
-    prompt = [
-        SystemMessage(content=DIFFICULTY_CLASSIFIER_SYSTEM_PROMPT),
-        HumanMessage(content=user_prompt),
-    ]
-
-    try:
-        result = classifier.invoke(prompt)
-        verdict = (getattr(result, "content", "") or "").strip().upper()
-
-        if verdict.startswith("HARD"):
-            return "hard"
-        elif verdict.startswith("MEDIUM"):
-            return "medium"
-        else:
-            return "easy"
-    except Exception as exc:
-        print(f"---ROUTER: DIFFICULTY CLASSIFIER ERROR {exc!r}---")
-        return "easy"  # 에러 시 기본값
 
 
 FEATURE_ACTIONS = {
@@ -302,39 +250,14 @@ def intent(state: AgentState) -> AgentState:
     """사용자 질문의 의도를 파악하고, RAG 호출 필요 여부 등을 결정합니다.
     어떤 경우든 router 그래프는 여기서 종료되고, maingraph가 다음을 결정합니다.
 
-<<<<<<< HEAD
-    또한 문제 난이도를 분류하여 credit_state에 저장합니다.
-=======
     checkpointer가 저장한 이전 대화 기록을 활용하여 맥락을 유지합니다.
->>>>>>> cf7bf04949b03632090aaef8e08b8bf24ef21ffa
+    난이도 분류는 각 Feature 서브그래프에서 수행합니다.
     """
     print("---ROUTER: INTENT DETECTION---")
     latest_question, ocr_full_text, combined_question, conversation_context = (
         _collect_user_context(state)
     )
     chosen = _extract_chosen_features(state)
-
-    # 난이도 분류 및 CreditState 초기화
-    difficulty = _classify_difficulty(combined_question)
-    print(f"---ROUTER: DIFFICULTY CLASSIFICATION RESULT {difficulty}---")
-
-    # CreditState 초기화 또는 업데이트
-    existing_credit = state.get("credit_state")
-    if existing_credit:
-        # 기존 상태가 있으면 난이도만 업데이트
-        if isinstance(existing_credit, dict):
-            existing_credit["difficulty"] = difficulty
-        else:
-            existing_credit.difficulty = difficulty
-        state["credit_state"] = existing_credit
-    else:
-        # 새로 초기화
-        state["credit_state"] = CreditState(difficulty=difficulty)
-
-    # RouterState에도 difficulty 저장 (하위 호환성)
-    router_state = state.get("router_state") or {}
-    router_state["difficulty"] = difficulty
-    state["router_state"] = router_state
 
     if "Solution" in chosen or _has_solution_intent(combined_question):
         state["simple_response"] = False

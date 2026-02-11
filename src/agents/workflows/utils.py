@@ -15,6 +15,8 @@ from agents.state import AgentState
 from core.llm import get_model
 from schema.models import OpenRouterModelName
 from agents.prompts.difficulty_prompts import (
+    DIFFICULTY_CLASSIFIER_SYSTEM_PROMPT,
+    DIFFICULTY_CLASSIFIER_USER_PROMPT,
     DIFFICULTY_MODEL_MAP,
     get_model_for_difficulty,
 )
@@ -278,6 +280,78 @@ def ensure_str_list(value: Any) -> List[str]:
         return [str(item).strip() for item in value if str(item).strip()]
     text = str(value).strip()
     return [text] if text else []
+
+
+def classify_difficulty(question: str) -> str:
+    """문제의 난이도를 LLM으로 분류합니다.
+
+    각 Feature 서브그래프에서 호출하여 난이도를 결정하고,
+    그에 맞는 모델을 선택하는 데 사용합니다.
+
+    난이도별 사용 모델:
+    - easy: Gemini 2.5 Flash
+    - medium: Gemini 3 Flash
+    - hard: Gemini 3 Pro
+
+    Args:
+        question: 문제/질문 텍스트
+
+    Returns:
+        난이도 (easy, medium, hard)
+    """
+    if not question:
+        return "easy"
+
+    classifier = get_model(OpenRouterModelName.GEMINI_25_FLASH)
+    classifier = classifier.with_config(tags=["skip_stream"])
+
+    user_prompt = DIFFICULTY_CLASSIFIER_USER_PROMPT.format(
+        problem_text=question[:2000]
+    )
+
+    prompt = [
+        SystemMessage(content=DIFFICULTY_CLASSIFIER_SYSTEM_PROMPT),
+        HumanMessage(content=user_prompt),
+    ]
+
+    try:
+        result = classifier.invoke(prompt)
+        verdict = (getattr(result, "content", "") or "").strip().upper()
+
+        if verdict.startswith("HARD"):
+            return "hard"
+        elif verdict.startswith("MEDIUM"):
+            return "medium"
+        else:
+            return "easy"
+    except Exception as exc:
+        print(f"---DIFFICULTY CLASSIFIER ERROR {exc!r}---")
+        return "easy"
+
+
+def set_difficulty_in_state(state: AgentState, difficulty: str) -> None:
+    """분류된 난이도를 credit_state와 router_state에 저장합니다.
+
+    Args:
+        state: AgentState
+        difficulty: 난이도 (easy, medium, hard)
+    """
+    # credit_state 업데이트
+    credit_state = state.get("credit_state")
+    if credit_state:
+        if isinstance(credit_state, dict):
+            credit_state["difficulty"] = difficulty
+        else:
+            credit_state.difficulty = difficulty
+        state["credit_state"] = credit_state
+    else:
+        from agents.state import CreditState
+        state["credit_state"] = CreditState(difficulty=difficulty)
+
+    # router_state에도 저장 (하위 호환성)
+    router_state = state.get("router_state") or {}
+    router_state["difficulty"] = difficulty
+    state["router_state"] = router_state
 
 
 def _normalize_difficulty(value: Any) -> str:
