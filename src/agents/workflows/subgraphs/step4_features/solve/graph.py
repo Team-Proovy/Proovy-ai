@@ -46,6 +46,18 @@ def analyze_problem(state: AgentState) -> AgentState:
     user_text = recent_user_context(state, max_messages=3, include_assistant=True)
     ocr_text = extract_ocr_text(state)
 
+    indexed_problem_text = ""
+    indexed_problem_number = None
+    problems = state.get("problems") or []
+    if isinstance(problems, list):
+        idx = int(state.get("current_problem_index", 0) or 0)
+        if 0 <= idx < len(problems):
+            item = problems[idx]
+            if isinstance(item, dict):
+                indexed_problem_text = str(item.get("text") or "").strip()
+                indexed_problem_number = item.get("number")
+            else:
+                indexed_problem_text = str(item).strip()
     # 난이도 분류 (Solve 단계에서 직접 수행)
     combined_question = user_text or ""
     if ocr_text:
@@ -68,9 +80,18 @@ User input (may be Korean or English):
 
 OCR extracted text (if any):
 {ocr_text or "N/A"}
+
 {context_section}
-Task: Analyze only the first explicit STEM problem you can find and respond in English.
-If user refers to a previous problem (e.g., '이전 문제', '방금 푼 문제'), use the conversation context to identify it.
+
+Indexed target problem number:
+{indexed_problem_number if indexed_problem_number is not None else "N/A"}
+
+Indexed target problem text:
+{indexed_problem_text or "N/A"}
+
+Task: If indexed target problem text is provided, analyze that problem first. Otherwise analyze the first explicit STEM problem you can find. 
+If user refers to a previous problem (e.g., '이전 문제', '방금 푼 문제'), use the conversation context and OCR text to identify it.
+Respond in English.
 """.strip()
 
     system_prompt = (
@@ -87,7 +108,11 @@ If user refers to a previous problem (e.g., '이전 문제', '방금 푼 문제'
     )
     payload = safe_json_loads(raw_response)
     problem_statement = (
-        payload.get("problem") or user_text or ocr_text or "문제가 명확하지 않습니다."
+        payload.get("problem")
+        or indexed_problem_text
+        or user_text
+        or ocr_text
+        or "문제가 명확하지 않습니다."
     )
     analysis = ProblemAnalysis(
         problem_statement=str(problem_statement).strip(),
