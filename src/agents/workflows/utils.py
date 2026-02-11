@@ -14,6 +14,12 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from agents.state import AgentState
 from core.llm import get_model
 from schema.models import OpenRouterModelName
+from agents.prompts.difficulty_prompts import (
+    DIFFICULTY_CLASSIFIER_SYSTEM_PROMPT,
+    DIFFICULTY_CLASSIFIER_USER_PROMPT,
+    DIFFICULTY_MODEL_MAP,
+    get_model_for_difficulty,
+)
 
 
 def message_to_text(message: BaseMessage) -> str:
@@ -276,6 +282,118 @@ def ensure_str_list(value: Any) -> List[str]:
     return [text] if text else []
 
 
+def classify_difficulty(question: str) -> str:
+    """문제의 난이도를 LLM으로 분류합니다.
+
+    각 Feature 서브그래프에서 호출하여 난이도를 결정하고,
+    그에 맞는 모델을 선택하는 데 사용합니다.
+
+    난이도별 사용 모델:
+    - easy: Gemini 2.5 Flash
+    - medium: Gemini 3 Flash
+    - hard: Gemini 3 Pro
+
+    Args:
+        question: 문제/질문 텍스트
+
+    Returns:
+        난이도 (easy, medium, hard)
+    """
+    if not question:
+        return "easy"
+
+    classifier = get_model(OpenRouterModelName.GEMINI_25_FLASH)
+    classifier = classifier.with_config(tags=["skip_stream"])
+
+    user_prompt = DIFFICULTY_CLASSIFIER_USER_PROMPT.format(
+        problem_text=question[:2000]
+    )
+
+    prompt = [
+        SystemMessage(content=DIFFICULTY_CLASSIFIER_SYSTEM_PROMPT),
+        HumanMessage(content=user_prompt),
+    ]
+
+    try:
+        result = classifier.invoke(prompt)
+        verdict = (getattr(result, "content", "") or "").strip().upper()
+
+        if verdict.startswith("HARD"):
+            return "hard"
+        elif verdict.startswith("MEDIUM"):
+            return "medium"
+        else:
+            return "easy"
+    except Exception as exc:
+        print(f"---DIFFICULTY CLASSIFIER ERROR {exc!r}---")
+        return "easy"
+
+
+def set_difficulty_in_state(state: AgentState, difficulty: str) -> None:
+    """분류된 난이도를 credit_state와 router_state에 저장합니다.
+
+    Args:
+        state: AgentState
+        difficulty: 난이도 (easy, medium, hard)
+    """
+    # credit_state 업데이트
+    credit_state = state.get("credit_state")
+    if credit_state:
+        if isinstance(credit_state, dict):
+            credit_state["difficulty"] = difficulty
+        else:
+            credit_state.difficulty = difficulty
+        state["credit_state"] = credit_state
+    else:
+        from agents.state import CreditState
+        state["credit_state"] = CreditState(difficulty=difficulty)
+
+    # router_state에도 저장 (하위 호환성)
+    router_state = state.get("router_state") or {}
+    router_state["difficulty"] = difficulty
+    state["router_state"] = router_state
+
+
+def _normalize_difficulty(value: Any) -> str:
+    difficulty = str(value).strip().lower()
+    return difficulty if difficulty in DIFFICULTY_MODEL_MAP else "easy"
+
+
+def get_difficulty_from_state(state: AgentState) -> str:
+    """state에서 난이도를 추출합니다.
+
+    Returns:
+        난이도 문자열 (easy, medium, hard). 기본값은 "easy"
+    """
+    # credit_state에서 확인
+    credit_state = state.get("credit_state")
+    if credit_state:
+        if isinstance(credit_state, dict):
+            return _normalize_difficulty(credit_state.get("difficulty", "easy"))
+        return _normalize_difficulty(getattr(credit_state, "difficulty", "easy"))
+
+    # router_state에서 확인
+    router_state = state.get("router_state")
+    if router_state:
+        if isinstance(router_state, dict):
+            return _normalize_difficulty(router_state.get("difficulty", "easy"))
+        return _normalize_difficulty(getattr(router_state, "difficulty", "easy"))
+
+    return "easy"
+
+
+def get_model_name_for_state(state: AgentState) -> OpenRouterModelName:
+    """state의 난이도에 맞는 LLM 모델을 반환합니다.
+
+    난이도별 모델:
+    - easy: Gemini 2.5 Flash (빠르고 저렴)
+    - medium: Gemini 3 Flash (대부분의 문제)
+    - hard: Gemini 3 Pro (복잡한 문제만)
+    """
+    difficulty = get_difficulty_from_state(state)
+    return get_model_for_difficulty(difficulty)
+
+
 def call_model(
     model_name: OpenRouterModelName,
     system_prompt: str,
@@ -310,3 +428,234 @@ def call_model(
             for chunk in content
         )
     return str(content)
+
+
+def call_model_by_difficulty(
+    state: AgentState,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    tags: list[str] | None = None,
+):
+    """state의 난이도에 맞는 모델로 LLM을 호출합니다.
+
+    난이도별 모델:
+    - easy: Gemini 2.5 Flash
+    - medium: Gemini 3 Flash
+    - hard: Gemini 3 Pro
+
+    Args:
+        state: AgentState (난이도 정보 포함)
+        system_prompt: 시스템 프롬프트
+        user_prompt: 사용자 프롬프트
+        tags: LangGraph 태그 (기본값: ["skip_stream"])
+
+    Returns:
+        LLM 응답 텍스트
+    """
+    model_name = get_model_name_for_state(state)
+    difficulty = get_difficulty_from_state(state)
+    print(f"→ Using model for difficulty '{difficulty}': {model_name}")
+    return call_model(model_name, system_prompt, user_prompt, tags=tags)
+
+
+# =============================================================================
+# 미들웨어 기반 비용 추적 (Cost Tracking Middleware)
+# =============================================================================
+
+# 난이도별 토큰당 비용 (크레딧 단위)
+COST_PER_1K_TOKENS = {
+    "easy": 0.5,    # Gemini 2.5 Flash - 저렴
+    "medium": 1.0,  # Gemini 3 Flash - 중간
+    "hard": 3.0,    # Gemini 3 Pro - 비쌈
+}
+
+
+class InsufficientCreditError(Exception):
+    """크레딧 부족 시 발생하는 예외"""
+    def __init__(self, balance: float, total_cost: float, node_name: str = ""):
+        self.balance = balance
+        self.total_cost = total_cost
+        self.node_name = node_name
+        self.message = f"크레딧 부족: 잔액 {balance}, 누적 비용 {total_cost}"
+        if node_name:
+            self.message += f" (노드: {node_name})"
+        super().__init__(self.message)
+
+
+def calculate_token_cost(response_metadata: Dict[str, Any], difficulty: str = "easy") -> float:
+    """LLM 응답의 토큰 사용량을 기반으로 비용을 계산합니다.
+
+    Args:
+        response_metadata: LLM 응답의 메타데이터 (usage_metadata 포함)
+        difficulty: 문제 난이도 (비용 단가 결정)
+
+    Returns:
+        계산된 비용 (크레딧 단위)
+    """
+    usage = response_metadata.get("usage_metadata") or response_metadata.get("token_usage") or {}
+
+    # 토큰 사용량 추출
+    total_tokens = usage.get("total_tokens", 0)
+    if total_tokens == 0:
+        input_tokens = usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0) or usage.get("completion_tokens", 0)
+        total_tokens = input_tokens + output_tokens
+
+    # 비용 계산
+    cost_per_1k = COST_PER_1K_TOKENS.get(difficulty, 1.0)
+    cost = (total_tokens / 1000) * cost_per_1k
+
+    return round(cost, 4)
+
+
+def check_credit_before_node(state: AgentState, node_name: str = "") -> None:
+    """노드 실행 전 크레딧 잔액을 체크합니다.
+
+    Args:
+        state: AgentState
+        node_name: 실행하려는 노드 이름
+
+    Raises:
+        InsufficientCreditError: 잔액 부족 시
+    """
+    credit_state = state.get("credit_state")
+    if not credit_state:
+        return  # 크레딧 상태 없으면 체크 스킵
+
+    if isinstance(credit_state, dict):
+        balance = credit_state.get("balance", 0)
+        total_cost = credit_state.get("total_cost", 0)
+    else:
+        balance = getattr(credit_state, "balance", 0)
+        total_cost = getattr(credit_state, "total_cost", 0)
+
+    if total_cost >= balance:
+        raise InsufficientCreditError(balance, total_cost, node_name)
+
+
+def update_credit_after_node(
+    state: AgentState,
+    node_name: str,
+    response_metadata: Dict[str, Any] | None = None,
+    fixed_cost: float | None = None,
+) -> Dict[str, Any]:
+    """노드 실행 후 크레딧 비용을 업데이트합니다.
+
+    Args:
+        state: AgentState
+        node_name: 실행된 노드 이름
+        response_metadata: LLM 응답 메타데이터 (토큰 기반 비용 계산용)
+        fixed_cost: 고정 비용 (토큰 계산 대신 사용)
+
+    Returns:
+        업데이트된 credit_state dict
+    """
+    credit_state = state.get("credit_state") or {}
+    if not isinstance(credit_state, dict):
+        credit_state = credit_state.model_dump() if hasattr(credit_state, 'model_dump') else {}
+
+    difficulty = credit_state.get("difficulty", "easy")
+
+    # 비용 계산
+    if fixed_cost is not None:
+        cost = fixed_cost
+    elif response_metadata:
+        cost = calculate_token_cost(response_metadata, difficulty)
+    else:
+        cost = 0.0
+
+    # 비용 누적
+    credit_state["total_cost"] = credit_state.get("total_cost", 0) + cost
+
+    # 노드별 비용 기록
+    cost_per_node = credit_state.get("cost_per_node", {})
+    cost_per_node[node_name] = cost_per_node.get(node_name, 0) + cost
+    credit_state["cost_per_node"] = cost_per_node
+
+    # 잔액 체크
+    balance = credit_state.get("balance", 0)
+    if credit_state["total_cost"] >= balance:
+        credit_state["insufficient"] = True
+        credit_state["stopped_at_feature"] = node_name
+
+    print(f"→ Credit updated: {node_name} cost={cost}, total={credit_state['total_cost']}/{balance}")
+
+    return credit_state
+
+
+def credit_guard_wrapper(node_func):
+    """크레딧 가드 미들웨어 데코레이터.
+
+    노드 실행 전 잔액 체크 + 실행 후 비용 업데이트를 자동화합니다.
+
+    사용법:
+        @credit_guard_wrapper
+        def my_node(state: AgentState) -> AgentState:
+            ...
+    """
+    def wrapper(state: AgentState) -> AgentState:
+        node_name = node_func.__name__
+
+        # 1. [BEFORE] 실행 전 체크
+        try:
+            check_credit_before_node(state, node_name)
+        except InsufficientCreditError as e:
+            print(f"→ Credit guard blocked: {e.message}")
+            # 크레딧 부족 상태 설정
+            credit_state = state.get("credit_state") or {}
+            if isinstance(credit_state, dict):
+                credit_state["insufficient"] = True
+                credit_state["stopped_at_feature"] = node_name
+                state["credit_state"] = credit_state
+            return state
+
+        # 2. 노드 실행
+        result = node_func(state)
+
+        # 3. [AFTER] 실행 후 비용 업데이트
+        # 메시지에서 usage 정보 추출
+        messages = result.get("messages") or []
+        response_metadata = {}
+        if messages:
+            last_msg = messages[-1]
+            if hasattr(last_msg, "response_metadata"):
+                response_metadata = last_msg.response_metadata or {}
+            elif hasattr(last_msg, "usage_metadata"):
+                response_metadata = {"usage_metadata": last_msg.usage_metadata}
+
+        updated_credit = update_credit_after_node(result, node_name, response_metadata)
+        result["credit_state"] = updated_credit
+
+        return result
+
+    # 함수 메타데이터 보존
+    wrapper.__name__ = node_func.__name__
+    wrapper.__doc__ = node_func.__doc__
+    return wrapper
+
+
+def check_credit_sufficient(state: AgentState) -> bool:
+    """Conditional Edge용: 크레딧이 충분한지 확인합니다.
+
+    Returns:
+        True: 크레딧 충분
+        False: 크레딧 부족
+    """
+    credit_state = state.get("credit_state")
+    if not credit_state:
+        return True
+
+    if isinstance(credit_state, dict):
+        balance = credit_state.get("balance", float("inf"))
+        total_cost = credit_state.get("total_cost", 0)
+        insufficient = credit_state.get("insufficient", False)
+    else:
+        balance = getattr(credit_state, "balance", float("inf"))
+        total_cost = getattr(credit_state, "total_cost", 0)
+        insufficient = getattr(credit_state, "insufficient", False)
+
+    if insufficient:
+        return False
+
+    return total_cost < balance

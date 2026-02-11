@@ -17,11 +17,15 @@ from agents.state import (
 from agents.tools import E2BExecutionError, run_python_with_e2b
 from agents.workflows.utils import (
     call_model,
+    call_model_by_difficulty,
+    classify_difficulty,
     ensure_str_list,
     extract_ocr_text,
     get_conversation_summary,
+    get_difficulty_from_state,
     recent_user_context,
     safe_json_loads,
+    set_difficulty_in_state,
 )
 from schema.models import OpenRouterModelName
 
@@ -41,6 +45,14 @@ def analyze_problem(state: AgentState) -> AgentState:
     solve_result = _ensure_solve_result(state)
     user_text = recent_user_context(state, max_messages=3, include_assistant=True)
     ocr_text = extract_ocr_text(state)
+
+    # 난이도 분류 (Solve 단계에서 직접 수행)
+    combined_question = user_text or ""
+    if ocr_text:
+        combined_question = f"{combined_question}\n{ocr_text}".strip()
+    difficulty = classify_difficulty(combined_question)
+    set_difficulty_in_state(state, difficulty)
+    print(f"---SOLVE: DIFFICULTY CLASSIFICATION RESULT {difficulty}---")
 
     # 이전 대화 맥락 수집 (멀티턴 지원)
     conversation_context = get_conversation_summary(state, max_chars=1000)
@@ -89,98 +101,6 @@ If user refers to a previous problem (e.g., '이전 문제', '방금 푼 문제'
     solve_result.analysis = analysis
     solve_result.problem = analysis.problem_statement
 
-    # 난이도 판단: 코드 실행이 필요한지 LLM에게 물어봄
-    difficulty_prompt = f"""
-Problem: {problem_statement}
-Domain: {analysis.domain}
-
-Task: Determine if this problem requires computational code execution or can be solved with simple reasoning.
-
-Return JSON with:
-- is_easy: true if it's a simple problem solvable with basic arithmetic or straightforward algebra
-- is_easy: false if it needs numerical computation, complex calculations, or symbolic manipulation with code
-- reason: brief explanation in English
-
-Examples:
-- "2x + 5 = 15" → is_easy: true (simple algebra)
-- "Calculate integral of x^2 from 0 to 10" → is_easy: false (needs numerical integration)
-- "What is 15% of 200?" → is_easy: true (basic arithmetic)
-- "Solve system of 3 equations with 3 unknowns" → is_easy: false (complex calculation)
-""".strip()
-
-    difficulty_system = (
-        "You are a difficulty assessor for STEM problems. "
-        "Determine if code execution is needed. Return only valid JSON."
-    )
-
-    difficulty_raw = call_model(
-        OpenRouterModelName.GPT_5_MINI,
-        difficulty_system,
-        difficulty_prompt,
-    )
-    difficulty_payload = safe_json_loads(difficulty_raw)
-    is_easy = difficulty_payload.get("is_easy", False)  # 기본값은 false (안전)
-
-    # state에 난이도 정보 저장
-    tool_outputs = state.setdefault("tool_outputs", {})
-    tool_outputs["is_easy_problem"] = is_easy
-    tool_outputs["difficulty_reason"] = difficulty_payload.get("reason", "")
-
-    # 쉬운 문제면 바로 LLM으로 풀이
-    if is_easy:
-        print("→ Easy problem detected: solving directly without code")
-        easy_solve_prompt = f"""
-Here is the problem analysis:
-{json.dumps(analysis.model_dump(), ensure_ascii=False, indent=2)}
-
-Task: This is a simple problem that doesn't require code execution.
-Solve it step-by-step and provide the final answer in Korean.
-
-Return JSON with:
-- answer: the final answer (concise, in Korean)
-- steps: array of 2-5 solution steps (in Korean)
-- latex: optional LaTeX expression for the final answer
-- summary: brief explanation (in Korean)
-""".strip()
-
-        easy_system = (
-            "You are a STEM tutor solving simple problems without code. "
-            "Provide clear step-by-step solutions in Korean. Return valid JSON."
-        )
-
-        easy_raw = call_model(
-            OpenRouterModelName.GPT_5_MINI,
-            easy_system,
-            easy_solve_prompt,
-        )
-
-        easy_payload = safe_json_loads(easy_raw)
-
-        solve_result.answer = str(
-            easy_payload.get("answer") or "답을 정리할 수 없습니다."
-        ).strip()
-        solve_result.steps = ensure_str_list(easy_payload.get("steps"))
-        latex_value = str(easy_payload.get("latex") or "").strip()
-        solve_result.latex = latex_value or solve_result.latex
-
-        final_summary = str(easy_payload.get("summary") or solve_result.answer).strip()
-
-        # final_output에 저장 (strategy, computation은 None)
-        analysis_dump = solve_result.analysis.model_dump()
-        final_output = state.setdefault("final_output", {})
-        final_output["solve"] = {
-            "analysis": analysis_dump,
-            "strategy": None,  # 코드 실행 안 함
-            "computation": None,  # 코드 실행 안 함
-            "answer": solve_result.answer,
-            "steps": solve_result.steps,
-            "latex": solve_result.latex,
-            "summary": final_summary,
-            "easy_mode": True,  # 간단한 문제 표시
-        }
-        state["final_output"] = final_output
-
-    state["tool_outputs"] = tool_outputs
     state["solve_result"] = solve_result
     state["prev_action"] = "Solve_Analysis"
     return state
@@ -300,8 +220,11 @@ def execute_strategy(state: AgentState) -> AgentState:
         "latex (optional final expression), and summary (one short explanation)."
     )
 
-    summary_raw = call_model(
-        OpenRouterModelName.GPT_5_MINI,
+    # 난이도 기반 모델로 결과 요약 (복잡한 문제는 더 강력한 모델 사용)
+    difficulty = get_difficulty_from_state(state)
+    print(f"→ Summarizing with difficulty: {difficulty}")
+    summary_raw = call_model_by_difficulty(
+        state,
         system_prompt,
         final_prompt,
     )
@@ -412,23 +335,6 @@ def solve_writer(state: AgentState) -> AgentState:
     return state
 
 
-def route_after_analysis(state: AgentState) -> str:
-    """Analysis 후 난이도에 따라 다음 노드 결정.
-
-    - is_easy=True: 간단한 문제 → 바로 Solve_Writer
-    - is_easy=False: 복잡한 문제 → Solve_Strategy
-    """
-    tool_outputs = state.get("tool_outputs") or {}
-    is_easy = tool_outputs.get("is_easy_problem", False)
-
-    if is_easy:
-        print("→ Easy problem: skipping to Solve_Writer")
-        return "Solve_Writer"
-    else:
-        print("→ Complex problem: going to Solve_Strategy")
-        return "Solve_Strategy"
-
-
 builder = StateGraph(AgentState)
 # 중간 분석/전략/계산 노드는 스트리밍 차단 (skip_stream)
 builder.add_node("Solve_Analysis", analyze_problem, tags=["skip_stream"])
@@ -439,21 +345,10 @@ builder.add_node("Solve_Writer", solve_writer)
 
 builder.set_entry_point("Solve_Analysis")
 
-# Analysis 후 난이도에 따라 분기
-builder.add_conditional_edges(
-    "Solve_Analysis",
-    route_after_analysis,
-    {
-        "Solve_Writer": "Solve_Writer",  # 쉬운 문제 → 바로 Writer
-        "Solve_Strategy": "Solve_Strategy",  # 복잡한 문제 → Strategy
-    },
-)
-
-# Complex path: Solve_Strategy → Solve_Computation → Solve_Writer
+# 항상 코드 실행: Analysis → Strategy → Computation → Writer → END
+builder.add_edge("Solve_Analysis", "Solve_Strategy")
 builder.add_edge("Solve_Strategy", "Solve_Computation")
 builder.add_edge("Solve_Computation", "Solve_Writer")
-
-# Writer는 항상 END로
 builder.add_edge("Solve_Writer", END)
 
 graph = builder.compile()

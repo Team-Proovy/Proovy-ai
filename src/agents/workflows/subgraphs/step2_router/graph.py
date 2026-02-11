@@ -251,12 +251,14 @@ def intent(state: AgentState) -> AgentState:
     어떤 경우든 router 그래프는 여기서 종료되고, maingraph가 다음을 결정합니다.
 
     checkpointer가 저장한 이전 대화 기록을 활용하여 맥락을 유지합니다.
+    난이도 분류는 각 Feature 서브그래프에서 수행합니다.
     """
     print("---ROUTER: INTENT DETECTION---")
     latest_question, ocr_full_text, combined_question, conversation_context = (
         _collect_user_context(state)
     )
     chosen = _extract_chosen_features(state)
+
     if "Solution" in chosen or _has_solution_intent(combined_question):
         state["simple_response"] = False
         state["prev_action"] = "Intent"

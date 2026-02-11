@@ -54,6 +54,7 @@ from service.utils import (
     langchain_to_chat_message,
     remove_tool_calls,
 )
+from service.credit_service import get_credit_service, CreditService
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
@@ -200,6 +201,33 @@ async def _handle_input(
     if user_input.chosen_features:
         input["chosen_features"] = list(user_input.chosen_features)
 
+    # 크레딧 잔액 조회 및 초기 상태 설정
+    raw_token = getattr(user_input, 'auth_token', None)
+    auth_token = raw_token.get_secret_value() if hasattr(raw_token, 'get_secret_value') else raw_token
+    try:
+        credit_service = get_credit_service()
+        balance = await credit_service.get_balance(user_id, token=auth_token)
+        input["credit_state"] = {
+            "balance": balance.total_available,
+            "total_cost": 0,
+            "cost_per_node": {},
+            "difficulty": "easy",
+            "insufficient": False,
+            "stopped_at_feature": None,
+        }
+        logger.info(f"_handle_input: credit_balance={balance.total_available}")
+    except Exception as e:
+        logger.warning(f"Failed to get credit balance: {e}")
+        # 크레딧 조회 실패 시 보수적으로 잔액 0 설정 (무제한 허용 방지)
+        input["credit_state"] = {
+            "balance": 0,
+            "total_cost": 0,
+            "cost_per_node": {},
+            "difficulty": "easy",
+            "insufficient": True,
+            "stopped_at_feature": None,
+        }
+
     kwargs = {
         "input": input,
         "config": config,
@@ -273,6 +301,13 @@ async def message_generator(
         "run_id": str(run_id),
     }
     yield f"data: {json.dumps(thread_id_event, ensure_ascii=False)}\n\n"
+
+    # 크레딧 사용 추적을 위한 변수
+    credit_usage: dict[str, Any] = {
+        "used_features": [],
+        "total_cost": 0,
+        "difficulty": "easy",
+    }
 
     # 노드별 진행 상태 문구 매핑 (최종 응답 전까지 "~하고 있습니다" 형태로 전달)
     progress_messages: dict[str, str] = {
@@ -363,7 +398,31 @@ async def message_generator(
                     if progress_line is not None:
                         yield progress_line  # type: ignore[misc]
 
+                    # Feature 노드 실행 추적 (크레딧 차감용)
+                    feature_nodes = {"Solve", "Explain", "CreateGraph", "Variant", "Solution", "Check"}
+                    feature_name = node_name
+                    if node_path:
+                        try:
+                            path_str = str(node_path)
+                            if isinstance(node_path, (tuple, list)) and node_path:
+                                feature_name = str(node_path[0])
+                            elif "/" in path_str:
+                                feature_name = path_str.split("/")[0]
+                        except Exception:
+                            pass
+                    if feature_name in feature_nodes and feature_name not in credit_usage["used_features"]:
+                        credit_usage["used_features"].append(feature_name)
+                        logger.info(f"Feature executed: {feature_name}")
+
                     updates = updates or {}
+
+                    # credit_state 업데이트 추적
+                    if "credit_state" in updates:
+                        cs = updates["credit_state"]
+                        if isinstance(cs, dict):
+                            credit_usage["difficulty"] = cs.get("difficulty", "easy")
+                            credit_usage["total_cost"] = cs.get("total_cost", 0)
+
                     update_messages = updates.get("messages", [])
                     # special cases for using langgraph-supervisor library
                     if "supervisor" in node or "sub-agent" in node:
@@ -451,6 +510,29 @@ async def message_generator(
         logger.exception("Error in message generator")
         yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'}, ensure_ascii=False)}\n\n"
     finally:
+        # 크레딧 차감 처리 (백그라운드에서 실행)
+        try:
+            # 스트리밍 중 수집된 크레딧 사용 정보를 기반으로 API 호출
+            if credit_usage.get("used_features"):
+                user_id = kwargs.get("config", {}).get("configurable", {}).get("user_id", "")
+                raw_token = getattr(user_input, 'auth_token', None)
+                auth_token = raw_token.get_secret_value() if hasattr(raw_token, 'get_secret_value') else raw_token
+                credit_service = get_credit_service()
+
+                for feature in credit_usage["used_features"]:
+                    try:
+                        await credit_service.use_credit(
+                            user_id=user_id,
+                            feature_name=feature,
+                            difficulty=credit_usage.get("difficulty", "easy"),
+                            token=auth_token,
+                        )
+                        logger.info(f"Credit deducted for feature: {feature}")
+                    except Exception:
+                        logger.exception(f"Failed to deduct credit for {feature}")
+        except Exception:
+            logger.exception("Error during credit deduction")
+
         yield "data: [DONE]\n\n"
 
 
