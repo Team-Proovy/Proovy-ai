@@ -202,7 +202,8 @@ async def _handle_input(
         input["chosen_features"] = list(user_input.chosen_features)
 
     # 크레딧 잔액 조회 및 초기 상태 설정
-    auth_token = getattr(user_input, 'auth_token', None)
+    raw_token = getattr(user_input, 'auth_token', None)
+    auth_token = raw_token.get_secret_value() if hasattr(raw_token, 'get_secret_value') else raw_token
     try:
         credit_service = get_credit_service()
         balance = await credit_service.get_balance(user_id, token=auth_token)
@@ -217,13 +218,13 @@ async def _handle_input(
         logger.info(f"_handle_input: credit_balance={balance.total_available}")
     except Exception as e:
         logger.warning(f"Failed to get credit balance: {e}")
-        # 크레딧 조회 실패 시 기본값 설정 (무제한처럼 동작)
+        # 크레딧 조회 실패 시 보수적으로 잔액 0 설정 (무제한 허용 방지)
         input["credit_state"] = {
-            "balance": 999999,
+            "balance": 0,
             "total_cost": 0,
             "cost_per_node": {},
             "difficulty": "easy",
-            "insufficient": False,
+            "insufficient": True,
             "stopped_at_feature": None,
         }
 
@@ -513,7 +514,8 @@ async def message_generator(
             # 스트리밍 중 수집된 크레딧 사용 정보를 기반으로 API 호출
             if credit_usage.get("used_features"):
                 user_id = kwargs.get("config", {}).get("configurable", {}).get("user_id", "")
-                auth_token = getattr(user_input, 'auth_token', None)
+                raw_token = getattr(user_input, 'auth_token', None)
+                auth_token = raw_token.get_secret_value() if hasattr(raw_token, 'get_secret_value') else raw_token
                 credit_service = get_credit_service()
 
                 for feature in credit_usage["used_features"]:
