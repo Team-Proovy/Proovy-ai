@@ -11,12 +11,20 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from core.settings import settings
+from agents.prompts.vision_ocr_prompt import VISION_OCR_PROMPT
 
 logger = logging.getLogger(__name__)
 
 
+def _load_prompt_text() -> str:
+    return VISION_OCR_PROMPT
+
+
 class OCRBlock(BaseModel):
-    type: str = Field("text", description="header, text, equation, latex, page_num 등")
+    type: str = Field(
+        "text",
+        description="header, text, math_inline, math_display, equation, latex, page_num 등",
+    )
     text: str = Field("", description="추출된 텍스트 또는 수식 내용")
     bbox: Optional[List[int]] = Field(None, description="[ymin, xmin, ymax, xmax]")
     latex: Optional[str] = Field(None, description="수식 블록일 경우 LaTeX 코드")
@@ -93,51 +101,7 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
                 }
             )
 
-        prompt = (
-            "당신은 다양한 종류의 이미지를 읽고 이해하는 멀티모달 OCR & 캡셔닝 전문가입니다. "
-            "주어진 이미지를 보고 텍스트, 수식, 레이아웃 정보를 구조화된 JSON 한 개로 반환하세요.\n\n"
-            "반드시 아래 조건을 지키세요:\n"
-            "1. 오직 하나의 JSON 객체만 출력합니다. 앞뒤에 설명 문장은 쓰지 않습니다.\n"
-            '2. 최상위에는 반드시 "ocr"(리스트), "image_caption"(리스트) 키를 포함합니다.\n'
-            "3. 각 페이지는 blocks로만 구성하며, blocks에 페이지의 모든 텍스트/수식을 포함합니다.\n"
-            "4. 입력 이미지 개수와 동일한 길이의 ocr 리스트를 반환하고, 순서를 유지합니다.\n"
-            "5. 텍스트가 거의 없더라도 blocks는 비우지 말고 빈 문자열 블록을 하나 넣습니다.\n\n"
-            "6. 블록은 문단/문제 단위로 최대한 묶어서 반환합니다.\n\n"
-            "출력 JSON 스키마 예시는 다음과 같습니다:\n"
-            "{\n"
-            '  "ocr": [\n'
-            "    {\n"
-            '      "page": 1,\n'
-            '      "blocks": [\n'
-            "        {\n"
-            '          "type": "header | text | latex | equation | page_num | figure | table",\n'
-            '          "text": "블록 내 텍스트 또는 수식 설명",\n'
-            '          "latex": "수식이 있는 경우 LaTeX 표현, 없으면 빈 문자열",\n'
-            '          "bbox": [ymin, xmin, ymax, xmax]\n'
-            "        }\n"
-            "      ]\n"
-            "    }\n"
-            "  ],\n"
-            '  "image_caption": [\n'
-            "    {\n"
-            '      "page": 1,\n'
-            '      "caption": "이 페이지 또는 전체 이미지에 대한 자연어 설명"\n'
-            "    }\n"
-            "  ]\n"
-            "}\n\n"
-            "Instructions in English:\n"
-            "- Always return a single JSON object with keys `ocr` and `image_caption`.\n"
-            "- For each page, return only `page` and `blocks` (do not include `ocr_text`).\n"
-            "- All readable text must appear in `blocks`.\n"
-            "- The `ocr` array length must match the number of input images (keep order).\n"
-            "- If text is missing, include one block with empty text instead of an empty list.\n"
-            "- `image_caption` must be written in Korean.\n"
-            "- Prefer paragraph or question-level blocks; do not split one sentence into many blocks.\n"
-            "- Split the page into `blocks` with `type`, `text`, optional `latex`, "
-            "and `bbox` = [ymin, xmin, ymax, xmax] in pixels.\n"
-            "- If there is no math, set `latex` to an empty string.\n"
-            "- If you are unsure, still follow the schema and use empty strings or empty arrays instead of omitting keys.\n"
-        )
+        prompt = _load_prompt_text()
 
         try:
             human = HumanMessage(
@@ -175,10 +139,44 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
                         if not part or part.lower().startswith("json"):
                             continue
                         candidates.append(part)
-                start = text.find("{")
-                end = text.rfind("}")
-                if start != -1 and end != -1 and end > start:
-                    candidates.append(text[start : end + 1].strip())
+
+                def _extract_json_blocks(src: str) -> List[str]:
+                    blocks: List[str] = []
+                    depth = 0
+                    start_idx: Optional[int] = None
+                    in_str = False
+                    str_char: Optional[str] = None
+                    escape = False
+                    for idx, ch in enumerate(src):
+                        if in_str:
+                            if escape:
+                                escape = False
+                                continue
+                            if ch == "\\":
+                                escape = True
+                                continue
+                            if ch == str_char:
+                                in_str = False
+                                str_char = None
+                            continue
+                        if ch in {"'", '"'}:
+                            in_str = True
+                            str_char = ch
+                            continue
+                        if ch == "{":
+                            if depth == 0:
+                                start_idx = idx
+                            depth += 1
+                            continue
+                        if ch == "}" and depth > 0:
+                            depth -= 1
+                            if depth == 0 and start_idx is not None:
+                                blocks.append(src[start_idx : idx + 1].strip())
+                                start_idx = None
+                    return blocks
+
+                candidates.extend(_extract_json_blocks(text))
+
                 # 중복 제거 (순서 유지)
                 seen = set()
                 uniq: List[str] = []
@@ -187,7 +185,16 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
                         continue
                     seen.add(item)
                     uniq.append(item)
-                return uniq
+
+                def _candidate_score(candidate: str) -> tuple[int, int, int]:
+                    has_ocr_key = bool(re.search(r"""["']ocr["']\s*:""", candidate))
+                    has_ocr_word = bool(re.search(r"""["']ocr["']""", candidate))
+                    return (1 if has_ocr_key else 0, 1 if has_ocr_word else 0, len(candidate))
+
+                # "ocr" 키 포함 후보를 우선 처리하고, 길이가 긴 후보를 선호
+                scored = [(idx, _candidate_score(item), item) for idx, item in enumerate(uniq)]
+                scored.sort(key=lambda x: (x[1][0], x[1][1], x[1][2]), reverse=True)
+                return [item for _, _, item in scored]
 
             def _try_load_json(text: str) -> Dict[str, Any] | None:
                 # 1차: 원문 그대로 파싱
@@ -196,17 +203,32 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
                         return json.loads(candidate)
                     except json.JSONDecodeError:
                         continue
-                # 2차: LaTeX 수식의 '\\' 때문에 JSON 이 깨진 경우를 완화
-                clean_text = re.sub(
-                    r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})',
-                    r"\\\\",
-                    text,
-                )
+
+                def _escape_latex_in_json(src: str) -> str:
+                    def _repl(match: re.Match) -> str:
+                        quote = match.group(1)
+                        inner = match.group(2)
+                        inner_escaped = re.sub(r'(?<!\\)\\', r"\\\\", inner)
+                        return f'"latex": {quote}{inner_escaped}{quote}'
+
+                    return re.sub(r'"latex"\s*:\s*("|\')([\s\S]*?)\1', _repl, src)
+
+                # 2차: LaTeX 필드만 타겟팅하여 이스케이프 처리
+                clean_text = _escape_latex_in_json(text)
                 for candidate in _candidate_strings(clean_text):
                     try:
                         return json.loads(candidate)
                     except json.JSONDecodeError:
                         continue
+
+                # 3차: "ocr" 키를 포함하는 후보 강제 시도
+                ocr_match = re.search(r'(\{[\s\S]*?["\']ocr["\'][\s\S]*?\})', text)
+                if ocr_match:
+                    try:
+                        return json.loads(ocr_match.group(1))
+                    except json.JSONDecodeError:
+                        pass
+
                 return None
 
             parsed = _try_load_json(raw_content)
@@ -309,6 +331,43 @@ def analyze_images(
                     else:
                         page_num = i + 1
                         blocks_data = [{"type": "text", "text": str(p_data)}]
+
+                    # 블록 정규화 및 중복 제거
+                    normalized_blocks: List[Dict[str, Any]] = []
+                    seen_keys: set[tuple] = set()
+                    for block in blocks_data:
+                        if not isinstance(block, dict):
+                            block = {"type": "text", "text": str(block)}
+                        block_type = str(block.get("type") or "text").strip().lower()
+                        text = str(block.get("text") or "")
+                        latex = str(block.get("latex") or "")
+                        bbox = block.get("bbox") if isinstance(block.get("bbox"), list) else None
+                        if latex and not text:
+                            block_type = "latex"
+                        elif latex and block_type in {"", "text"}:
+                            # Choice prefix like "ㄱ." or "①" should be treated as math block
+                            if not re.search(r"[가-힣A-Za-z]", text):
+                                block_type = "math_inline"
+                        # If this is a math block but latex is missing, reuse text as latex
+                        if block_type in {"latex", "equation", "math_inline", "math_display"} and not latex and text:
+                            latex = text
+                        normalized = {
+                            "type": block_type,
+                            "text": text,
+                            "latex": latex,
+                            "bbox": bbox,
+                        }
+                        key = (
+                            normalized.get("type") or "",
+                            (normalized.get("text") or "").strip(),
+                            (normalized.get("latex") or "").strip(),
+                            tuple(normalized.get("bbox") or []),
+                        )
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        normalized_blocks.append(normalized)
+                    blocks_data = normalized_blocks
 
                     p_obj = PageOCR(
                         page=page_num,

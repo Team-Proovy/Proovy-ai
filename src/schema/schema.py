@@ -1,7 +1,11 @@
 # HTTP API 입·출력에 쓰이는 핵심 데이터 구조(Pydantic 모델)들을 정의한다.
 from typing import Any, Literal, NotRequired
 
+<<<<<<< HEAD
 from pydantic import BaseModel, Field, SerializeAsAny, SecretStr
+=======
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
+>>>>>>> cf7bf04949b03632090aaef8e08b8bf24ef21ffa
 from typing_extensions import TypedDict
 
 from schema.models import AllModelEnum, OpenAIModelName
@@ -40,6 +44,8 @@ class ServiceMetadata(BaseModel):
 
 class UserInput(BaseModel):
     """에이전트에 전달되는 기본 사용자 입력."""
+
+    model_config = ConfigDict(populate_by_name=True)
 
     message: str = Field(
         description="User input to the agent.",

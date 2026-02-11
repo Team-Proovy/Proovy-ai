@@ -180,34 +180,67 @@ def suggestion(state: AgentState) -> AgentState:
 
 def simple_response(state: AgentState) -> AgentState:
     # Flowchart: "단순 응답"
-    """Router 단계에서 단순 응답으로 판별된 경우 최종 답변을 구성합니다."""
+    """Router 단계에서 단순 응답으로 판별된 경우 최종 답변을 구성합니다.
+
+    checkpointer가 저장한 이전 대화 히스토리를 활용하여
+    멀티턴 대화의 맥락을 유지합니다.
+    """
+    from agents.workflows.utils import get_conversation_history, message_to_text
+
     print("---MAIN: SIMPLE RESPONSE---")
     messages = state.get("messages") or []
+
+    # 마지막 사용자 메시지 추출
     user_text = ""
     if messages:
         last_message: BaseMessage = messages[-1]
-        # HumanMessage 또는 user 타입인 경우에만 텍스트를 사용
         if getattr(last_message, "type", None) in {"human", "user"} and isinstance(
             getattr(last_message, "content", ""), str
         ):
             user_text = last_message.content.strip()
 
     if not user_text:
-        # 사용자 질문이 없으면 별도 응답을 만들지 않고 그대로 반환
         return state
+
+    # 이전 대화 히스토리를 LLM에 전달하기 위해 수집
+    # 최근 5턴의 대화를 포함하여 맥락 유지
+    conversation_history = get_conversation_history(
+        state,
+        max_turns=5,
+        max_chars_per_message=800,
+    )
+
+    # 대화 맥락 요약 생성 (시스템 프롬프트에 포함)
+    history_context = ""
+    if len(conversation_history) > 1:  # 이전 대화가 있는 경우
+        history_lines = []
+        for msg in conversation_history[:-1]:  # 마지막 메시지 제외 (현재 질문)
+            role = "사용자" if getattr(msg, "type", "") in {"human", "user"} else "AI"
+            content = message_to_text(msg)[:300]
+            history_lines.append(f"{role}: {content}")
+        if history_lines:
+            history_context = "\n\n[이전 대화 기록]\n" + "\n".join(history_lines)
 
     system_prompt = (
         "You are a friendly Korean tutor chatbot. "
         "The user asked a non-STEM question. "
         "Answer briefly and conversationally in natural Korean, "
-        "without complex math or formulas."
+        "without complex math or formulas. "
+        "If the user refers to previous conversation (e.g., '이전 문제', '방금 푼 문제'), "
+        "use the conversation history to provide a relevant answer."
+        f"{history_context}"
     )
 
     model = get_model(OpenRouterModelName.GPT_5_MINI)
-    prompt_messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_text),
-    ]
+
+    # 전체 대화 히스토리를 LLM에 전달
+    prompt_messages = [SystemMessage(content=system_prompt)]
+
+    # 이전 대화 맥락이 있으면 메시지로 포함
+    if len(conversation_history) > 1:
+        prompt_messages.extend(conversation_history)
+    else:
+        prompt_messages.append(HumanMessage(content=user_text))
 
     ai_message = model.invoke(prompt_messages)
 
@@ -498,4 +531,5 @@ builder.add_edge("FinalResponse", END)
 
 
 # "agent": "src.agents.workflows.maingraph:graph"
-graph = builder.compile()
+# checkpointer를 주입하기 위해 builder만 export하고, 컴파일은 agents.py에서 수행
+graph_builder = builder
