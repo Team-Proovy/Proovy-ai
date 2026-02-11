@@ -141,6 +141,9 @@ class AgentState(TypedDict):
     tool_outputs: NotRequired[Dict[str, Any]]
     final_output: NotRequired[Dict[str, Any]]
     chosen_features: NotRequired[List[str]]
+    problems: NotRequired[List[Dict[str, Any]]]  # 문제 인벤토리: [{"number": int|None, "text": str, "marker": str}]
+    current_problem_index: NotRequired[int]  # 현재 풀이 대상 문제 인덱스(0-based)
+    last_input_hash: NotRequired[str]  # input_files 변경 감지용 fingerprint
     solution_chunks: NotRequired[List[str]]
     solution_progress: NotRequired[SolutionProgress]
     solution_pdf: NotRequired[Dict[str, Any]]
