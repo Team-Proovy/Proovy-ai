@@ -105,6 +105,23 @@ class ReviewState(BaseModel):
     reasons: List[str] = Field(default_factory=list)
 
 
+class CreditState(BaseModel):
+    """Credit Layer (크레딧 관리)
+
+    미들웨어 기반 비용 추적:
+    - balance: 시작 시 조회한 잔액
+    - total_cost: 미들웨어가 누적할 비용 (Annotated[float, add] 패턴)
+    - 각 노드 실행 후 Conditional Edge에서 잔액 체크
+    """
+
+    balance: float = 0.0  # 시작 시 조회한 잔액
+    total_cost: float = 0.0  # 누적 비용 (미들웨어가 자동 합산)
+    cost_per_node: Dict[str, float] = Field(default_factory=dict)  # 노드별 비용
+    difficulty: Literal["easy", "medium", "hard"] = "easy"  # 문제 난이도
+    insufficient: bool = False  # 크레딧 부족 여부
+    stopped_at_feature: Optional[str] = None  # 크레딧 부족으로 중단된 기능
+
+
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
@@ -126,6 +143,9 @@ class AgentState(TypedDict):
 
     # Review Layer
     review_state: NotRequired[ReviewState]
+
+    # Credit Layer
+    credit_state: NotRequired[CreditState]
 
     # Routing context
     prev_action: Optional[str]
