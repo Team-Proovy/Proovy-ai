@@ -261,7 +261,8 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
     print(
         f"---SUGGESTION: MODEL={MODEL_NAME} openrouter_key_set={bool(settings.OPENROUTER_API_KEY)}---"
     )
-    model = get_model(MODEL_NAME)
+    # Suggestion 노드는 구조화 JSON을 내부적으로만 사용하므로 토큰 스트리밍을 비활성화한다.
+    model = get_model(MODEL_NAME).with_config(tags=["skip_stream"])
     review_state = _ensure_dict_review_state(state.get("review_state"))
     last_user_msg = _last_user_message(state.get("messages") or [])
 
