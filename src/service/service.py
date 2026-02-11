@@ -414,14 +414,15 @@ async def message_generator(
                         credit_usage["used_features"].append(feature_name)
                         logger.info(f"Feature executed: {feature_name}")
 
+                    updates = updates or {}
+
                     # credit_state 업데이트 추적
-                    if updates and "credit_state" in updates:
+                    if "credit_state" in updates:
                         cs = updates["credit_state"]
                         if isinstance(cs, dict):
                             credit_usage["difficulty"] = cs.get("difficulty", "easy")
                             credit_usage["total_cost"] = cs.get("total_cost", 0)
 
-                    updates = updates or {}
                     update_messages = updates.get("messages", [])
                     # special cases for using langgraph-supervisor library
                     if "supervisor" in node or "sub-agent" in node:
@@ -527,10 +528,10 @@ async def message_generator(
                             token=auth_token,
                         )
                         logger.info(f"Credit deducted for feature: {feature}")
-                    except Exception as credit_err:
-                        logger.error(f"Failed to deduct credit for {feature}: {credit_err}")
-        except Exception as credit_ex:
-            logger.error(f"Error during credit deduction: {credit_ex}")
+                    except Exception:
+                        logger.exception(f"Failed to deduct credit for {feature}")
+        except Exception:
+            logger.exception("Error during credit deduction")
 
         yield "data: [DONE]\n\n"
 
