@@ -16,6 +16,27 @@ from core.settings import settings
 logger = logging.getLogger(__name__)
 
 
+def normalize_auth_token(token: Any) -> str | None:
+    """Authorization 헤더에 넣기 전에 토큰 문자열을 정규화한다."""
+    if token is None:
+        return None
+
+    value = token.get_secret_value() if hasattr(token, "get_secret_value") else str(token)
+    value = value.strip()
+    if not value:
+        return None
+
+    # "Bearer Bearer <token>"처럼 중복 prefix가 붙어 있어도 모두 제거
+    while value.lower().startswith("bearer "):
+        value = value[7:].strip()
+
+    # 문자열로 감싼 값('"token"' 또는 "'token'") 방어
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
+        value = value[1:-1].strip()
+
+    return value or None
+
+
 class DifficultyLevel(str, Enum):
     """문제 난이도"""
     EASY = "easy"
@@ -93,14 +114,9 @@ class CreditService:
 
     def _get_headers(self, token: str = None) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        auth_token = token or self.auth_token
+        auth_token = normalize_auth_token(token or self.auth_token)
         if auth_token:
-            auth_value = (
-                auth_token.get_secret_value()
-                if hasattr(auth_token, "get_secret_value")
-                else auth_token
-            )
-            headers["Authorization"] = f"Bearer {auth_value}"
+            headers["Authorization"] = f"Bearer {auth_token}"
         return headers
 
     def calculate_cost(

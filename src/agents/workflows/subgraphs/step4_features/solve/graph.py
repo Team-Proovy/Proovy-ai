@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import tempfile
 from typing import List
 
 from langgraph.graph import END, StateGraph
@@ -42,6 +46,63 @@ def _ensure_solve_result(state: AgentState) -> SolveResult:
         solve_result = SolveResult()
     state["solve_result"] = solve_result
     return solve_result
+
+
+def _env_truthy(key: str, default: str = "0") -> bool:
+    value = os.getenv(key, default).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _run_python_locally(
+    code: str,
+    *,
+    timeout: float = 30.0,
+) -> tuple[bool, List[str], List[str], str | None, str | None]:
+    """Fallback local execution for generated Python code."""
+
+    temp_file = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(code)
+            temp_file = handle.name
+
+        runtime_env: dict[str, str] = {"PYTHONIOENCODING": "utf-8"}
+        allowed_env_keys = {
+            "PATH",
+            "SYSTEMROOT",
+            "WINDIR",
+            "HOME",
+            "USERPROFILE",
+            "TMP",
+            "TEMP",
+            "PYTHONHOME",
+        }
+        for key in allowed_env_keys:
+            value = os.environ.get(key)
+            if value is not None:
+                runtime_env[key] = value
+
+        result = subprocess.run(
+            [sys.executable, temp_file],
+            env=runtime_env,
+            capture_output=True,
+            text=False,
+            timeout=timeout,
+        )
+        stdout = result.stdout.decode("utf-8", errors="ignore").splitlines()
+        stderr = result.stderr.decode("utf-8", errors="ignore").splitlines()
+        text_output = "\n".join(stdout).strip() or None
+        return result.returncode == 0, stdout, stderr, text_output, None
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return False, [], [], None, str(exc)
+    finally:
+        if temp_file and os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
 
 
 def analyze_problem(state: AgentState) -> AgentState:
@@ -200,10 +261,15 @@ def execute_strategy(state: AgentState) -> AgentState:
 
     code = solve_result.strategy.generated_code
     tool_outputs = state.setdefault("tool_outputs", {})
+    tool_outputs["solve_execution_status"] = "running"
+    tool_outputs["solve_execution_backend"] = "e2b"
+    state["tool_outputs"] = tool_outputs
+
     success = True
     stdout: List[str]
     stderr: List[str]
     text_output: str | None
+    execution_backend = "e2b"
 
     try:
         execution = run_python_with_e2b(code)
@@ -220,7 +286,24 @@ def execute_strategy(state: AgentState) -> AgentState:
             if getattr(exc.execution, "logs", None):
                 stdout.extend(getattr(exc.execution.logs, "stdout", []))
                 stderr.extend(getattr(exc.execution.logs, "stderr", []))
-
+        else:
+            # Fall back to local execution if E2B fails and fallback is allowed
+            allow_local_fallback = _env_truthy("SOLVE_LOCAL_PYTHON_FALLBACK", "1")
+            if allow_local_fallback:
+                execution_backend = "local"
+                local_ok, local_stdout, local_stderr, local_text, local_error = (
+                    _run_python_locally(code)
+                )
+                success = local_ok
+                stdout = local_stdout
+                stderr = list(local_stderr)
+                if local_error:
+                    stderr.append(f"Local execution error: {local_error}")
+                stderr.append(f"E2B fallback reason: {str(exc)}")
+                text_output = local_text
+            else:
+                stderr.append(f"Execution error: {str(exc)}")
+    
     execution_summary = ComputationSummary(
         success=success,
         stdout=stdout,
@@ -229,6 +312,8 @@ def execute_strategy(state: AgentState) -> AgentState:
     )
     solve_result.computation = execution_summary
     tool_outputs["solve_execution"] = execution_summary.model_dump()
+    tool_outputs["solve_execution_backend"] = execution_backend
+    tool_outputs["solve_execution_status"] = "success" if success else "failed"
     state["tool_outputs"] = tool_outputs
 
     analysis_dump = solve_result.analysis.model_dump() if solve_result.analysis else {}
@@ -278,6 +363,8 @@ def execute_strategy(state: AgentState) -> AgentState:
         "analysis": analysis_dump,
         "strategy": strategy_dump,
         "computation": computation_dump,
+        "execution_status": tool_outputs.get("solve_execution_status"),
+        "execution_backend": tool_outputs.get("solve_execution_backend"),
         "answer": solve_result.answer,
         "steps": solve_result.steps,
         "latex": solve_result.latex,

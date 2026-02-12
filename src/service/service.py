@@ -54,7 +54,7 @@ from service.utils import (
     langchain_to_chat_message,
     remove_tool_calls,
 )
-from service.credit_service import get_credit_service
+from service.credit_service import get_credit_service, normalize_auth_token
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
@@ -163,7 +163,6 @@ async def _handle_input(
     if settings.LANGFUSE_TRACING:
         # Initialize Langfuse CallbackHandler for Langchain (tracing)
         langfuse_handler = CallbackHandler()
-
         callbacks.append(langfuse_handler)
 
     if user_input.agent_config:
@@ -182,17 +181,12 @@ async def _handle_input(
         callbacks=callbacks,
     )
 
-    # thread_id가 있으면 checkpointer가 자동으로 이전 messages를 로드하고,
-    # 여기서 전달한 새 메시지를 추가합니다. (멀티턴 대화 지원)
     input: Command | dict[str, Any]
     input = {"messages": [HumanMessage(content=user_input.message)]}
 
-    # files_url 이 설정된 경우, Preprocessing 이 바로 사용할 수 있도록
-    # tool_outputs.input_path / input_files 를 초기 state 에 심어준다.
     if user_input.files_url:
         files = list(user_input.files_url)
         primary = files[0]
-        # 디버그용 로그: files_url 이 실제로 들어오는지 확인
         logger.info(f"_handle_input: files_url={files}, primary={primary}")
         tool_outputs: dict[str, Any] = {
             "input_path": primary,
@@ -208,12 +202,8 @@ async def _handle_input(
         input["chosen_features"] = list(user_input.chosen_features)
 
     # 크레딧 잔액 조회 및 초기 상태 설정
-    raw_token = getattr(user_input, "auth_token", None)
-    auth_token = (
-        raw_token.get_secret_value()
-        if hasattr(raw_token, "get_secret_value")
-        else raw_token
-    )
+    auth_token = normalize_auth_token(getattr(user_input, "auth_token", None))
+
     try:
         credit_service = get_credit_service()
         balance = await credit_service.get_balance(user_id, token=auth_token)
@@ -228,7 +218,6 @@ async def _handle_input(
         logger.info(f"_handle_input: credit_balance={balance.total_available}")
     except Exception as e:
         logger.warning(f"Failed to get credit balance: {e}")
-        # 크레딧 조회 실패 시 보수적으로 잔액 0 설정 (무제한 허용 방지)
         input["credit_state"] = {
             "balance": 0,
             "total_cost": 0,
@@ -246,39 +235,24 @@ async def _handle_input(
     return kwargs, run_id, thread_id
 
 
-# [중요도: 9/10] 단일 추론 실행 - 핵심 기능, 최종 응답만 반환하는 심플한 요청-응답 패턴
 @router.post("/{agent_id}/invoke", operation_id="invoke_with_agent_id")
 @router.post("/invoke")
 async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMessage:
     """
     Invoke an agent with user input to retrieve a final response.
-
-    If agent_id is not provided, the default agent will be used.
-    Use thread_id to persist and continue a multi-turn conversation. run_id kwarg
-    is also attached to messages for recording feedback.
-    Use user_id to persist and continue a conversation across multiple threads.
     """
-    # NOTE: Currently this only returns the last message or interrupt.
-    # In the case of an agent outputting multiple AIMessages (such as the background step
-    # in interrupt-agent, or a tool step in research-assistant), it's omitted. Arguably,
-    # you'd want to include it. You could update the API to return a list of ChatMessages
-    # in that case.
     agent: AgentGraph = get_agent(agent_id)
     kwargs, run_id, _thread_id = await _handle_input(user_input, agent)
 
     try:
-        response_events: list[tuple[str, Any]] = await agent.ainvoke(**kwargs, stream_mode=["updates", "values"])  # type: ignore # fmt: skip
+        response_events: list[tuple[str, Any]] = await agent.ainvoke(**kwargs, stream_mode=["updates", "values"])
         response_type, response = response_events[-1]
         if response_type == "values":
-            # Normal response, the agent completed successfully
             output = langchain_to_chat_message(response["messages"][-1])
-            # 최종 상태에 저장된 구조화 결과(final_output)를 함께 포함
             final_output = response.get("final_output")
             if final_output is not None:
                 output.custom_data["final_output"] = final_output
         elif response_type == "updates" and "__interrupt__" in response:
-            # The last thing to occur was an interrupt
-            # Return the value of the first interrupt as an AIMessage
             output = langchain_to_chat_message(
                 AIMessage(content=response["__interrupt__"][0].value)
             )
@@ -297,14 +271,10 @@ async def message_generator(
 ) -> AsyncGenerator[str, None]:
     """
     Generate a stream of messages from the agent.
-
-    This is the workhorse method for the /stream endpoint.
     """
     agent: AgentGraph = get_agent(agent_id)
     kwargs, run_id, thread_id = await _handle_input(user_input, agent)
 
-    # 스트리밍 시작 시 thread_id를 포함한 초기 이벤트를 먼저 전송
-    # proovy-server에서 Note.threadId / ChatSession.externalThreadId 저장에 사용
     thread_id_event = {
         "type": "thread_id",
         "thread_id": thread_id,
@@ -312,14 +282,12 @@ async def message_generator(
     }
     yield f"data: {json.dumps(thread_id_event, ensure_ascii=False)}\n\n"
 
-    # 크레딧 사용 추적을 위한 변수
     credit_usage: dict[str, Any] = {
         "used_features": [],
         "total_cost": 0,
         "difficulty": "easy",
     }
 
-    # 노드별 진행 상태 문구 매핑 (최종 응답 전까지 "~하고 있습니다" 형태로 전달)
     progress_messages: dict[str, str] = {
         "CheckType": "첨부된 파일 유형을 분석하고 있습니다.",
         "FileConvert": "문서를 이미지로 변환하고 있습니다.",
@@ -333,7 +301,7 @@ async def message_generator(
         "RetrievedDocs": "검색된 자료를 컨텍스트에 주입하고 있습니다.",
         "Solve_Analysis": "문제를 분석하고 필요한 정보를 정리하고 있습니다.",
         "Solve_Strategy": "문제 풀이 전략과 코드를 생성하고 있습니다.",
-        "Solve_Computation": "문제에 대한 코드를 실행 중입니다.",
+        "Solve_Computation": "파이썬 코드를 실제로 실행 중입니다.",
         "Solve_Writer": "풀이 결과를 정리하여 답변을 작성하고 있습니다.",
         "Explain": "질문 내용을 쉽게 설명할 방법을 정리하고 있습니다.",
         "Explain_Writer": "개념 설명을 작성하고 있습니다.",
@@ -344,71 +312,51 @@ async def message_generator(
         "Review": "전체 풀이 결과를 자동으로 리뷰하고 있습니다.",
         "Suggestion": "다음 학습 방향에 대한 제안을 준비하고 있습니다.",
     }
+    emitted_progress_nodes: set[str] = set()
 
-    def is_final_node(path: Any) -> bool:
-        """스트리밍 이벤트의 node_path가 FinalResponse 노드를 가리키는지 확인.
-
-        node_path의 실제 타입(tuple, list, NodePath, str 등)에 상관없이
-        문자열 표현 안에 "FinalResponse"가 포함되어 있으면 최종 응답 노드로 간주한다.
-        """
-        if path is None:
-            return False
-        try:
-            return "FinalResponse" in str(path)
-        except Exception:
-            return False
-
-    def emit_progress(node_name: str | None) -> None:
-        """비 최종 노드용 진행 상황 custom 메시지를 SSE로 전송."""
-        if not node_name:
-            return
-        text = progress_messages.get(node_name)
-        if not text:
-            return
-        progress = ChatMessage(
-            type="custom", content="", custom_data={"node": node_name, "status": text}
-        )  # type: ignore[call-arg]
-        progress.run_id = str(run_id)
-        yield_line = f"data: {json.dumps({'type': 'message', 'content': progress.model_dump()}, ensure_ascii=False)}\n\n"
-        # message_generator는 async generator이므로, 내부 헬퍼에서 직접 yield 할 수 없어
-        # 호출 측에서 이 문자열을 다시 yield 하도록 반환 값 대신 클로저 형태로 사용한다.
-        return yield_line  # type: ignore[return-value]
+    def emit_progress(node_name: str) -> str | None:
+        if node_name in emitted_progress_nodes:
+            return None
+        message = progress_messages.get(node_name)
+        if message is None:
+            return None
+        emitted_progress_nodes.add(node_name)
+        return (
+            "data: "
+            + json.dumps(
+                {"type": "progress", "node": node_name, "content": message},
+                ensure_ascii=False,
+            )
+            + "\n\n"
+        )
 
     try:
-        # Process streamed events from the graph and yield messages over the SSE stream.
         async for stream_event in agent.astream(
             **kwargs, stream_mode=["updates", "messages", "custom"], subgraphs=True
         ):
             if not isinstance(stream_event, tuple):
                 continue
-            # Handle different stream event structures based on subgraphs
+
             node_path: Any | None = None
             if len(stream_event) == 3:
-                # With subgraphs=True: (node_path, stream_mode, event)
                 node_path, stream_mode, event = stream_event
             else:
-                # Without subgraphs: (stream_mode, event)
                 stream_mode, event = stream_event
+
             new_messages = []
             if stream_mode == "updates":
                 for node, updates in event.items():
-                    # A simple approach to handle agent interrupts.
-                    # In a more sophisticated implementation, we could add
-                    # some structured ChatMessage type to return the interrupt value.
                     if node == "__interrupt__":
                         interrupt: Interrupt
                         for interrupt in updates:
                             new_messages.append(AIMessage(content=interrupt.value))
                         continue
 
-                    # 비 최종 노드에 대해서는 진행 상황 custom 메시지만 보내고,
-                    # 중간 AI/Human 메시지는 클라이언트에 노출하지 않는다.
                     node_name = str(node).split("/")[-1]
                     progress_line = emit_progress(node_name)
                     if progress_line is not None:
                         yield progress_line  # type: ignore[misc]
 
-                    # Feature 노드 실행 추적 (크레딧 차감용)
                     feature_nodes = {
                         "Solve",
                         "Explain",
@@ -427,16 +375,12 @@ async def message_generator(
                                 feature_name = path_str.split("/")[0]
                         except Exception:
                             pass
-                    if (
-                        feature_name in feature_nodes
-                        and feature_name not in credit_usage["used_features"]
-                    ):
+                    if feature_name in feature_nodes and feature_name not in credit_usage["used_features"]:
                         credit_usage["used_features"].append(feature_name)
                         logger.info(f"Feature executed: {feature_name}")
 
                     updates = updates or {}
 
-                    # credit_state 업데이트 추적
                     if "credit_state" in updates:
                         cs = updates["credit_state"]
                         if isinstance(cs, dict):
@@ -444,52 +388,39 @@ async def message_generator(
                             credit_usage["total_cost"] = cs.get("total_cost", 0)
 
                     update_messages = updates.get("messages", [])
-                    # special cases for using langgraph-supervisor library
-                    if "supervisor" in node or "sub-agent" in node:
-                        # the only tools that come from the actual agent are the handoff and handback tools
-                        if isinstance(update_messages[-1], ToolMessage):
-                            if "sub-agent" in node and len(update_messages) > 1:
-                                # If this is a sub-agent, we want to keep the last 2 messages - the handback tool, and it's result
+                    node_text = str(node)
+                    if "supervisor" in node_text or "sub-agent" in node_text:
+                        if not update_messages:
+                            update_messages = []
+                        elif isinstance(update_messages[-1], ToolMessage):
+                            if "sub-agent" in node_text and len(update_messages) > 1:
                                 update_messages = update_messages[-2:]
                             else:
-                                # If this is a supervisor, we want to keep the last message only - the handoff result. The tool comes from the 'agent' node.
                                 update_messages = [update_messages[-1]]
                         else:
                             update_messages = []
 
-                    # FinalResponse 노드가 partial_responses를 조합한 경우
-                    # LLM 호출 없이 문자열만 합치므로 토큰 스트림이 발생하지 않는다.
-                    # 이 경우 update_messages에 담긴 최종 AIMessage를 직접 전송한다.
                     if node_name == "FinalResponse" and update_messages:
                         new_messages.extend(update_messages)
-                    # 그 외 중간 노드의 update_messages는 클라이언트로 전달하지 않는다.
 
             if stream_mode == "custom":
                 new_messages = [event]
 
-            # LangGraph streaming may emit tuples: (field_name, field_value)
-            # e.g. ('content', <str>), ('tool_calls', [ToolCall,...]), ('additional_kwargs', {...}), etc.
-            # We accumulate only supported fields into `parts` and skip unsupported metadata.
-            # More info at: https://langchain-ai.github.io/langgraph/cloud/how-tos/stream_messages/
             processed_messages = []
             current_message: dict[str, Any] = {}
             for message in new_messages:
                 if isinstance(message, tuple):
                     key, value = message
-                    # Store parts in temporary dict
                     current_message[key] = value
                 else:
-                    # Add complete message if we have one in progress
                     if current_message:
                         processed_messages.append(_create_ai_message(current_message))
                         current_message = {}
                     processed_messages.append(message)
 
-            # Add any remaining message parts
             if current_message:
                 processed_messages.append(_create_ai_message(current_message))
 
-            # updates/custom에서 생성된 processed_messages만 일반 message로 전송
             for message in processed_messages:
                 try:
                     chat_message = langchain_to_chat_message(message)
@@ -498,40 +429,14 @@ async def message_generator(
                     logger.error(f"Error parsing message: {e}")
                     yield f"data: {json.dumps({'type': 'error', 'content': 'Unexpected error'}, ensure_ascii=False)}\n\n"
                     continue
-                # LangGraph re-sends the input message, which feels weird, so drop it
-                if (
-                    chat_message.type == "human"
-                    and chat_message.content == user_input.message
-                ):
+                if chat_message.type == "human" and chat_message.content == user_input.message:
                     continue
                 yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()}, ensure_ascii=False)}\n\n"
 
-            if stream_mode == "messages":
-                # LangGraph가 LLM 토큰을 messages 스트림으로 전달해 줄 때,
-                # 여기서는 node_path에 관계없이 토큰을 그대로 클라이언트로 전달한다.
-                # (중간 노드에서의 불필요한 스트리밍은 그래프 쪽의 nostream 태그로 제어함)
-                if not user_input.stream_tokens:
-                    continue
-                msg, metadata = event
-                if "skip_stream" in metadata.get("tags", []):
-                    continue
-                # For some reason, astream("messages") causes non-LLM nodes to send extra messages.
-                # Drop them.
-                if not isinstance(msg, AIMessageChunk):
-                    continue
-                content = remove_tool_calls(msg.content)
-                if content:
-                    # Empty content in the context of OpenAI usually means
-                    # that the model is asking for a tool to be invoked.
-                    # So we only print non-empty content.
-                    yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)}, ensure_ascii=False)}\n\n"
     except Exception:
-        # 전체 스택트레이스를 찍어서 LangGraph 내부 에러 원인까지 추적할 수 있도록 한다.
         logger.exception("Error in message generator")
         yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'}, ensure_ascii=False)}\n\n"
     finally:
-        # 크레딧 차감은 Spring(proovy-server) doOnComplete()에서 직접 처리.
-        # proovy_ai에서 Spring API를 다시 호출하는 방식은 auth_token 부재로 실패하므로 제거.
         yield "data: [DONE]\n\n"
 
 
