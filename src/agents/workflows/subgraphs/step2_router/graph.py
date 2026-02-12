@@ -17,7 +17,10 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState
-from agents.workflows.problem_utils import extract_problem_inventory, input_files_fingerprint
+from agents.workflows.problem_utils import (
+    extract_problem_inventory,
+    input_files_fingerprint,
+)
 from agents.workflows.utils import extract_ocr_text
 from core.llm import get_model
 from schema.models import OpenRouterModelName
@@ -95,9 +98,14 @@ def _is_next_problem_request(text: str) -> bool:
         return False
     stripped = text.strip()
     normalized = stripped.replace(" ", "").lower()
-    if stripped in NEXT_CONFIRM_WORDS or normalized in {w.lower() for w in NEXT_CONFIRM_WORDS}:
+    if stripped in NEXT_CONFIRM_WORDS or normalized in {
+        w.lower() for w in NEXT_CONFIRM_WORDS
+    }:
         return True
-    return any(keyword.replace(" ", "").lower() in normalized for keyword in NEXT_PROBLEM_KEYWORDS)
+    return any(
+        keyword.replace(" ", "").lower() in normalized
+        for keyword in NEXT_PROBLEM_KEYWORDS
+    )
 
 
 def _order_problem_inventory(items: list[dict]) -> list[dict]:
@@ -107,7 +115,9 @@ def _order_problem_inventory(items: list[dict]) -> list[dict]:
             items,
             key=lambda item: (
                 not isinstance(item, dict) or item.get("number") is None,
-                int(item.get("number")) if isinstance(item, dict) and item.get("number") is not None else 10**9,
+                int(item.get("number"))
+                if isinstance(item, dict) and item.get("number") is not None
+                else 10**9,
             ),
         )
     except Exception:
@@ -344,11 +354,16 @@ def intent(state: AgentState) -> AgentState:
 
         system_prompt = (
             "You are a strict classifier. "
-            "Return only 'STEM' if the user's question is about math, physics, "
-            "chemistry, biology, engineering, computer science, or similar STEM subjects. "
-            "Consider the conversation context when classifying - if user refers to previous "
-            "STEM problems (e.g., '이전 문제', '방금 푼 문제'), it should be classified as STEM. "
-            "Otherwise return 'NON_STEM'."
+            "Return 'STEM' ONLY if the user's input is a clear, explicit question or request "
+            "about math, physics, chemistry, biology, engineering, or computer science. "
+            "IMPORTANT: Return 'NON_STEM' for:\n"
+            "- Random numbers without context (e.g., '569', '123')\n"
+            "- Single words or phrases that are not explicit STEM questions\n"
+            "- Greetings, casual chat, or meaningless input\n"
+            "- Ambiguous input that could be anything\n"
+            "Consider the conversation context - if user refers to previous "
+            "STEM problems (e.g., '이전 문제', '방금 푼 문제'), classify as STEM. "
+            "When in doubt, return 'NON_STEM'."
         )
         prompt_messages = [
             SystemMessage(content=system_prompt),
@@ -379,12 +394,20 @@ def intent(state: AgentState) -> AgentState:
     return state
 
 
-def intent_route(state: AgentState) -> Literal["Planner", "Executor"]:
+def intent_route(state: AgentState) -> Literal["Planner", "Executor", "__end__"]:
     """RAG 검색 결과와 사용자 의도를 종합하여 단일/복합 의도를 결정합니다.
+    - simple_response인 경우: 즉시 종료 (maingraph에서 Simple_response로 라우팅)
     - 복합 의도: 실행 계획 수립을 위해 Planner로 이동
     - 단일 의도: 바로 실행을 위해 Executor로 이동
     """
     print("---ROUTER: INTENT ROUTING---")
+
+    # simple_response가 True면 Feature 실행 없이 바로 종료
+    # maingraph의 route_to_feature에서 Simple_response로 라우팅됨
+    if state.get("simple_response") is True:
+        print("---ROUTER: SIMPLE RESPONSE DETECTED, SKIPPING FEATURES---")
+        return "__end__"
+
     existing_plan = [
         step for step in (state.get("plan") or []) if step in FEATURE_ACTIONS
     ]
@@ -534,6 +557,7 @@ builder.add_conditional_edges(
     {
         "Planner": "Planner",
         "Executor": "Executor",
+        "__end__": END,
     },
 )
 

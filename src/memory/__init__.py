@@ -5,18 +5,18 @@ Windows에서도 이벤트 루프 제약 없이 동작하도록 비동기 드라
 동기 PostgresSaver를 우선 사용합니다.
 
 LangGraph의 AsyncPregelLoop 는 checkpointer 에서 비동기 메소드
-``aget_tuple``, ``aput`` 등을 호출하지만, PostgresSaver/MemorySaver 는
+``aget_tuple``, ``aput`` 등을 호출하지만, PostgresSaver 는
 동기 메소드만 구현되어 있는 버전이 있어 NotImplementedError 가 발생할 수 있습니다.
 이를 피하기 위해, 동기 saver 를 비동기 인터페이스로 감싸는 래퍼를 제공하여
 async 메소드 호출을 내부적으로 스레드로 위임합니다.
+
+PostgresSaver 초기화 실패 시 checkpointer 없이 AI 응답이 진행됩니다.
 """
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Any
+from typing import AsyncIterator, Any, Optional
 import logging
-
-from langgraph.checkpoint.memory import MemorySaver
 
 logger = logging.getLogger(__name__)
 
@@ -97,11 +97,11 @@ class AsyncCheckpointerWrapper:
 
 
 @asynccontextmanager
-async def initialize_database() -> AsyncIterator[Any]:
+async def initialize_database() -> AsyncIterator[Optional[Any]]:
     """단기 메모리(checkpointer) 초기화.
 
-    POSTGRES_URI가 설정되어 있으면 PostgresSaver(동기)를 우선 사용하고,
-    실패 시 MemorySaver(인메모리)로 폴백합니다.
+    POSTGRES_URI가 설정되어 있으면 PostgresSaver(동기)를 사용합니다.
+    실패 시 None을 반환하며, AI 응답은 checkpointer 없이 진행됩니다.
     """
     from core.settings import settings
 
@@ -123,7 +123,7 @@ async def initialize_database() -> AsyncIterator[Any]:
                     logger.info("PostgreSQL checkpointer schema setup completed")
                 except Exception as setup_error:  # pragma: no cover - fallback path
                     logger.error(
-                        "PostgreSQL checkpointer setup failed, falling back to MemorySaver: %s",
+                        "PostgreSQL checkpointer setup failed: %s",
                         setup_error,
                     )
                     raise
@@ -135,15 +135,17 @@ async def initialize_database() -> AsyncIterator[Any]:
                 return
         except Exception as e:  # pragma: no cover - fallback path
             logger.error(
-                "Sync PostgresSaver initialization failed, falling back to MemorySaver: %s",
+                "PostgresSaver initialization failed. Continuing without checkpointer: %s",
                 e,
             )
+            yield None
+            return
 
-    # 위에서 PostgresSaver 초기화에 실패했거나 POSTGRES_URI 가 설정되지 않은 경우
-    logger.info("Using MemorySaver (in-memory) for LangGraph checkpointer")
-    saver = MemorySaver()
-    async_saver = AsyncCheckpointerWrapper(saver)
-    yield async_saver
+    # POSTGRES_URI 가 설정되지 않은 경우
+    logger.warning(
+        "POSTGRES_URI not configured. Running without checkpointer (no conversation history persistence)."
+    )
+    yield None
 
 
 @asynccontextmanager
