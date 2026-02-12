@@ -14,7 +14,11 @@ from agents.state import (
     SolveResult,
     SolveStrategy,
 )
-from agents.tools import E2BExecutionError, run_python_with_e2b
+from agents.tools import (
+    E2BExecutionError,
+    get_user_friendly_error_message,
+    run_python_with_e2b,
+)
 from agents.workflows.utils import (
     call_model,
     call_model_by_difficulty,
@@ -238,7 +242,7 @@ def execute_strategy(state: AgentState) -> AgentState:
     except E2BExecutionError as exc:
         success = False
         stdout = []
-        stderr = [str(exc)]
+        stderr = [get_user_friendly_error_message(exc)]
         text_output = None
         if exc.execution:
             text_output = getattr(exc.execution, "text", None) or text_output

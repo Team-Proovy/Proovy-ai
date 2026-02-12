@@ -21,6 +21,41 @@ from schema.models import OpenRouterModelName
 MODEL_NAME = OpenRouterModelName.GPT_5_MINI
 
 
+def _format_review_message(review_state: dict | None) -> str:
+    """review_state를 사람이 읽기 좋은 한국어 메시지로 변환합니다.
+
+    JSON 형태로 LLM에 전달하면 응답에 그대로 노출되는 문제가 있어,
+    자연스러운 문장 형태로 변환하여 전달합니다.
+    """
+    if not review_state:
+        return ""
+
+    if isinstance(review_state, str):
+        return review_state
+
+    parts: list[str] = []
+
+    # 피드백
+    feedback = review_state.get("feedback")
+    if feedback and feedback != "All deterministic checks passed.":
+        parts.append(f"검토 결과: {feedback}")
+
+    # 제안사항
+    suggestions = review_state.get("suggestions")
+    if suggestions and isinstance(suggestions, list) and any(suggestions):
+        parts.append("개선 제안:")
+        for i, suggestion in enumerate(suggestions, 1):
+            if suggestion:
+                parts.append(f"  {i}. {suggestion}")
+
+    # 검토 사유
+    reasons = review_state.get("reasons")
+    if reasons and isinstance(reasons, list) and any(reasons):
+        parts.append(f"검토 사유: {', '.join(reasons)}")
+
+    return "\n".join(parts) if parts else ""
+
+
 def _last_user_message(state: AgentState) -> str | None:
     messages = state.get("messages") or []
     for msg in reversed(messages):
@@ -106,19 +141,30 @@ def final_response(state: AgentState) -> AgentState:
         answer_text = call_model(
             MODEL_NAME, system_prompt, user_prompt, tags=[]
         ).strip()
-        print(f"Final response from partial_responses via LLM (length: {len(answer_text)})")
+        print(
+            f"Final response from partial_responses via LLM (length: {len(answer_text)})"
+        )
 
     else:
         # === 기존 방식: 전체 final_output을 LLM으로 종합 ===
         print("No partial_responses, using traditional full LLM synthesis")
 
         user_text = _last_user_message(state) or ""
-        serialized_final = json.dumps(final_output, ensure_ascii=False, default=str)
-        serialized_review = (
-            json.dumps(review_state, ensure_ascii=False, default=str)
-            if review_state is not None
-            else ""
-        )
+
+        # OCR 원문(problem)은 응답에 포함하지 않음 - 핵심 결과만 전달
+        filtered_final = {}
+        if isinstance(final_output, dict):
+            # OCR 원문 및 review JSON 관련 필드 제외 (review는 별도 포맷팅)
+            exclude_keys = {"problem", "ocr_text", "ocr_blocks", "raw_ocr", "review"}
+            for k, v in final_output.items():
+                if k not in exclude_keys:
+                    filtered_final[k] = v
+        else:
+            filtered_final = {"raw": str(final_output)}
+
+        serialized_final = json.dumps(filtered_final, ensure_ascii=False, default=str)
+        # review_state는 JSON이 아닌 자연스러운 한국어 메시지로 변환
+        formatted_review = _format_review_message(review_state)
 
         # 이전 대화 맥락 수집 (멀티턴 대화 지원)
         conversation_context = get_conversation_summary(state, max_chars=1500)
@@ -141,8 +187,8 @@ def final_response(state: AgentState) -> AgentState:
             parts.append(f"[사용자 질문]\n{user_text}")
         if serialized_final:
             parts.append(f"[중간 결과 요약(final_output)]\n{serialized_final}")
-        if serialized_review:
-            parts.append(f"[리뷰/재시도 정보(review_state)]\n{serialized_review}")
+        if formatted_review:
+            parts.append(f"[검토 결과]\n{formatted_review}")
 
         parts.append(
             "위 정보를 종합해서, 사용자에게 보여줄 최종 한국어 답변을 작성해 줘. "

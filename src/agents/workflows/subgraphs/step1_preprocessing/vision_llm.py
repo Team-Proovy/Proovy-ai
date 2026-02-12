@@ -62,7 +62,7 @@ class MockVisionProvider(VisionProvider):
                             "text": "a/b",
                             "latex": "\\frac{a}{b}",
                             "bbox": [0, 0, 0, 0],
-                        }
+                        },
                     ],
                 }
             )
@@ -70,21 +70,21 @@ class MockVisionProvider(VisionProvider):
 
 
 class OpenRouterGeminiVisionProvider(VisionProvider):
-    """OpenRouter의 google/gemini-2.5-flash 모델을 사용하는 Vision Provider.
-    """
+    """OpenRouter의 google/gemini-2.5-flash 모델을 사용하는 Vision Provider."""
 
     def __init__(self, model_name: str = "google/gemini-2.5-flash"):
         if not settings.OPENROUTER_API_KEY:
             raise ValueError("OPENROUTER_API_KEY가 설정되지 않았습니다.")
 
         # OpenRouter의 OpenAI 호환 엔드포인트를 사용하는 ChatOpenAI 인스턴스 생성
+        # skip_stream 태그를 추가하여 OCR 응답이 클라이언트로 스트리밍되지 않도록 함
         self.model = ChatOpenAI(
             model=model_name,
             base_url="https://openrouter.ai/api/v1/",
             api_key=settings.OPENROUTER_API_KEY,
             temperature=0.1,
             response_format={"type": "json_object"},
-        )
+        ).with_config(tags=["skip_stream"])
 
     def analyze(self, images: List[Path], options: Dict[str, Any]) -> Dict[str, Any]:
         image_contents: List[Dict[str, Any]] = []
@@ -109,7 +109,6 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
             )
             response = self.model.invoke([human])
 
-           
             raw_content = response.content
             if isinstance(raw_content, list):
                 parts: List[str] = []
@@ -128,6 +127,7 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
                 raw_content = "".join(parts)
             elif not isinstance(raw_content, str):
                 raw_content = str(raw_content)
+
             def _candidate_strings(text: str) -> List[str]:
                 stripped = text.strip()
                 candidates: List[str] = []
@@ -189,10 +189,16 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
                 def _candidate_score(candidate: str) -> tuple[int, int, int]:
                     has_ocr_key = bool(re.search(r"""["']ocr["']\s*:""", candidate))
                     has_ocr_word = bool(re.search(r"""["']ocr["']""", candidate))
-                    return (1 if has_ocr_key else 0, 1 if has_ocr_word else 0, len(candidate))
+                    return (
+                        1 if has_ocr_key else 0,
+                        1 if has_ocr_word else 0,
+                        len(candidate),
+                    )
 
                 # "ocr" 키 포함 후보를 우선 처리하고, 길이가 긴 후보를 선호
-                scored = [(idx, _candidate_score(item), item) for idx, item in enumerate(uniq)]
+                scored = [
+                    (idx, _candidate_score(item), item) for idx, item in enumerate(uniq)
+                ]
                 scored.sort(key=lambda x: (x[1][0], x[1][1], x[1][2]), reverse=True)
                 return [item for _, _, item in scored]
 
@@ -208,7 +214,7 @@ class OpenRouterGeminiVisionProvider(VisionProvider):
                     def _repl(match: re.Match) -> str:
                         quote = match.group(1)
                         inner = match.group(2)
-                        inner_escaped = re.sub(r'(?<!\\)\\', r"\\\\", inner)
+                        inner_escaped = re.sub(r"(?<!\\)\\", r"\\\\", inner)
                         return f'"latex": {quote}{inner_escaped}{quote}'
 
                     return re.sub(r'"latex"\s*:\s*("|\')([\s\S]*?)\1', _repl, src)
@@ -279,6 +285,7 @@ def analyze_images(
     imgs = [Path(p) for p in image_paths if p]
 
     try:
+
         def _normalize_ocr_list(raw_ocr: Any) -> List[Any]:
             if raw_ocr is None:
                 return []
@@ -341,7 +348,11 @@ def analyze_images(
                         block_type = str(block.get("type") or "text").strip().lower()
                         text = str(block.get("text") or "")
                         latex = str(block.get("latex") or "")
-                        bbox = block.get("bbox") if isinstance(block.get("bbox"), list) else None
+                        bbox = (
+                            block.get("bbox")
+                            if isinstance(block.get("bbox"), list)
+                            else None
+                        )
                         if latex and not text:
                             block_type = "latex"
                         elif latex and block_type in {"", "text"}:
@@ -349,7 +360,12 @@ def analyze_images(
                             if not re.search(r"[가-힣A-Za-z]", text):
                                 block_type = "math_inline"
                         # If this is a math block but latex is missing, reuse text as latex
-                        if block_type in {"latex", "equation", "math_inline", "math_display"} and not latex and text:
+                        if (
+                            block_type
+                            in {"latex", "equation", "math_inline", "math_display"}
+                            and not latex
+                            and text
+                        ):
                             latex = text
                         normalized = {
                             "type": block_type,
@@ -402,7 +418,9 @@ def analyze_images(
             return ""
 
         resp_raw = provider.analyze(imgs, options={"structured": True})
-        captions = resp_raw.get("image_caption", []) if isinstance(resp_raw, dict) else []
+        captions = (
+            resp_raw.get("image_caption", []) if isinstance(resp_raw, dict) else []
+        )
         pages, extra_captions = _parse_pages(resp_raw)
         if extra_captions:
             captions = list(captions or []) + extra_captions
