@@ -15,6 +15,7 @@ from agents.workflows.subgraphs.step1_preprocessing.vision_llm import analyze_im
 
 # --- 헬퍼들  ---
 
+
 def _model_copy(fp: FileProcessing, update: Dict[str, Any]) -> FileProcessing:
     """Pydantic v2 환경: model_copy(update=...)로 새 인스턴스 반환."""
     return fp.model_copy(update=update)
@@ -29,6 +30,13 @@ def _ensure_fp(state: AgentState) -> FileProcessing:
 
 def _is_s3_uri(uri: Optional[str]) -> bool:
     return isinstance(uri, str) and uri.startswith("s3://")
+
+
+def _is_http_url(uri: Optional[str]) -> bool:
+    """HTTP/HTTPS URL인지 확인 (S3 공개 URL 포함)"""
+    return isinstance(uri, str) and (
+        uri.startswith("http://") or uri.startswith("https://")
+    )
 
 
 def _infer_file_type(input_path_str: Optional[str]) -> str:
@@ -50,9 +58,14 @@ def _infer_file_type(input_path_str: Optional[str]) -> str:
 
 def _localize_input_path(input_path_str: str, tmp_dir: Path) -> Path:
     """
-    s3:// URI면 preprocessing_utils.download_s3_to_local을 호출해 로컬 Path 반환.
+    원격 파일(s3://, http://, https://)이면 로컬로 다운로드한 뒤 Path 반환.
     로컬이면 Path로 바로 반환.
     """
+    # HTTP/HTTPS URL인 경우 (S3 공개 URL 포함)
+    if _is_http_url(input_path_str):
+        return preprocessing_utils.download_from_url(input_path_str, tmp_dir)
+
+    # s3:// URI인 경우 (boto3 사용 필요)
     if _is_s3_uri(input_path_str):
         if not hasattr(preprocessing_utils, "download_s3_to_local"):
             raise RuntimeError(
@@ -60,6 +73,8 @@ def _localize_input_path(input_path_str: str, tmp_dir: Path) -> Path:
                 "함수가 구현되어 있어야 합니다."
             )
         return preprocessing_utils.download_s3_to_local(input_path_str, tmp_dir)
+
+    # 로컬 파일 경로
     return Path(input_path_str)
 
 
@@ -69,7 +84,15 @@ def _extract_path_from_file_item(item: Any) -> Optional[str]:
     if isinstance(item, (str, Path)):
         return str(item)
     if isinstance(item, dict):
-        for key in ("path", "file_path", "url", "s3_uri", "filename", "name", "file_name"):
+        for key in (
+            "path",
+            "file_path",
+            "url",
+            "s3_uri",
+            "filename",
+            "name",
+            "file_name",
+        ):
             value = item.get(key)
             if value:
                 return str(value)
@@ -102,7 +125,9 @@ def _collect_input_paths(state: AgentState, tool_outputs: Dict[str, Any]) -> Lis
     return unique
 
 
-def _primary_input_path(state: AgentState, tool_outputs: Dict[str, Any]) -> Optional[str]:
+def _primary_input_path(
+    state: AgentState, tool_outputs: Dict[str, Any]
+) -> Optional[str]:
     paths = _collect_input_paths(state, tool_outputs)
     return paths[0] if paths else None
 
@@ -122,13 +147,14 @@ def _pick_preferred_path(paths: List[str], preferred: set[str]) -> Optional[str]
     return paths[0] if paths else None
 
 
-
 def check_type(state: AgentState) -> AgentState:
     """파일 유형 판별 및 file_processing.file_type 업데이트."""
     print("--- CHECKTYPE ---")
     tool_outputs = state.get("tool_outputs") or {}
     paths = _collect_input_paths(state, tool_outputs)
-    inferred = _infer_primary_type_from_paths(paths) if paths else _infer_file_type(None)
+    inferred = (
+        _infer_primary_type_from_paths(paths) if paths else _infer_file_type(None)
+    )
     if inferred == "pdf":
         category = "mixed_files"
     elif inferred == "image":
@@ -228,7 +254,9 @@ def vision_llm(state: AgentState) -> AgentState:
     return state
 
 
-def route_by_check_type(state: AgentState) -> Literal["FileConvert", "VisionLLM", "__end__"]:
+def route_by_check_type(
+    state: AgentState,
+) -> Literal["FileConvert", "VisionLLM", "__end__"]:
     """파일 형식에 따라 다음 단계를 결정합니다.
 
     - mixed_files: PDF/PPT 등 변환이 필요한 파일이 포함된 경우 'FileConvert'로 갑니다.
