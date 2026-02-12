@@ -22,7 +22,11 @@ _checkpointer: Any = None
 
 
 def set_checkpointer(checkpointer: Any) -> None:
-    """lifespan에서 호출하여 checkpointer를 주입합니다."""
+    """lifespan에서 호출하여 checkpointer를 주입합니다.
+
+    checkpointer가 None인 경우에도 정상적으로 설정되며,
+    이 경우 그래프는 checkpointer 없이 컴파일됩니다.
+    """
     global _checkpointer
     _checkpointer = checkpointer
 
@@ -45,10 +49,15 @@ agents: dict[str, Agent] = {
 
 
 def get_agent(agent_id: str) -> AgentGraph:
-    """필요하다면 지연 컴파일을 수행한 뒤 에이전트 그래프를 반환한다."""
+    """필요하다면 지연 컴파일을 수행한 뒤 에이전트 그래프를 반환한다.
+
+    _checkpointer가 None인 경우에도 그래프는 정상적으로 컴파일되며,
+    단지 대화 히스토리가 저장되지 않을 뿐입니다.
+    """
     agent = agents[agent_id]
 
     # 아직 컴파일되지 않았으면 checkpointer와 함께 컴파일
+    # checkpointer가 None이어도 그래프는 정상 동작함 (히스토리 저장만 안됨)
     if agent.graph_like is None and agent.graph_builder is not None:
         agent.graph_like = agent.graph_builder.compile(checkpointer=_checkpointer)
 

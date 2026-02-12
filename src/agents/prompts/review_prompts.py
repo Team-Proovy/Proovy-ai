@@ -40,6 +40,8 @@ SUGGESTION_SYSTEM_PROMPT = """
 목적:
 - review 정보(피드백·이유)와 최근 사용자 메시지, feature 요약을 바탕으로
   즉시 사용자에게 보낼 `ai_message`, UI/DB에 저장할 `summary`, 그리고 실천 가능한 `suggestion_bullets`를 생성합니다.
+- 입력에 `Solve progress context`가 포함되면(예: 총 문제 수, 현재 순번, 다음 문제 번호),
+  이를 반영해 자연스러운 진행 안내 문구를 작성하세요.
 
 강력한 제약 (반드시 따르세요):
 1) 출력은 "오직 JSON"만 허용합니다 — 추가 설명·코드펜스 금지.
