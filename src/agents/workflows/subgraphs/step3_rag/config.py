@@ -55,7 +55,7 @@ MIN_DOCS = _int_env("RAG_MIN_DOCS", 1)
 
 # SCORE_THRESHOLD: score 임계값 (0.0 - 1.0 권장)
 SCORE_THRESHOLD = _float_env(
-    "RAG_SCORE_THRESHOLD", 0.75, min_value=0.0, max_value=1.0
+    "RAG_SCORE_THRESHOLD", 0.45, min_value=0.0, max_value=1.0
 )
 
 # TRUNCATE_LIMIT: 문서/쿼리 자르기 한계 (문자 수)

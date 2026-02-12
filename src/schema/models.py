@@ -17,6 +17,14 @@ class OpenAIModelName(StrEnum):
     GPT_5_1 = "gpt-5.1"
 
 
+class OpenAIEmbeddingModelName(StrEnum):
+    """OpenAI Embedding 모델 이름 (https://platform.openai.com/docs/guides/embeddings)."""
+
+    TEXT_EMBEDDING_3_SMALL = "text-embedding-3-small"
+    TEXT_EMBEDDING_3_LARGE = "text-embedding-3-large"
+    TEXT_EMBEDDING_ADA_002 = "text-embedding-ada-002"
+
+
 class OpenRouterModelName(StrEnum):
     """OpenRouter 에서 제공하는 모델 이름 (https://openrouter.ai/models)."""
 

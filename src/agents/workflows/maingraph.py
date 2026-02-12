@@ -529,7 +529,7 @@ builder.add_edge("Simple_response", "FinalResponse")
 builder.add_edge("CreditInsufficient", "FinalResponse")
 builder.add_edge("FinalResponse", END)
 
-
+graph = builder.compile()
 # "agent": "src.agents.workflows.maingraph:graph"
 # checkpointer를 주입하기 위해 builder만 export하고, 컴파일은 agents.py에서 수행
 graph_builder = builder

@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
-from agents.workflows.subgraphs.step3_rag import config
-from agents.workflows.subgraphs.step3_rag.types import RetrievedDoc
+from core.settings import settings
 from rag.vector_store.base import BaseVectorStore
 from rag.vector_store.mock import MockVectorStore
 from rag.vector_store.pgvector import PgVectorStore
@@ -13,11 +12,39 @@ from rag.vector_store.pgvector import PgVectorStore
 logger = logging.getLogger(__name__)
 
 
+class RetrievedDoc(TypedDict):
+    id: str
+    title: str
+    text: str
+    score: Optional[float]
+    metadata: Dict[str, Any]
+
+
 def _create_vector_store() -> BaseVectorStore:
     backend = os.getenv("RAG_VECTORSTORE", "mock").lower()
     if backend == "pgvector":
-        dsn = os.getenv("PGVECTOR_DSN", "")
-        return PgVectorStore(dsn=dsn)
+        # PGVECTOR_DSN이 직접 있으면 최우선 사용, 없으면 DB_* 설정들로 조합
+        dsn = os.getenv("PGVECTOR_DSN")
+        if not dsn:
+            try:
+                dsn = settings.POSTGRES_URI
+            except Exception:
+                logger.warning("Failed to build DSN from settings, falling back to empty")
+                dsn = ""
+        
+        index_name = os.getenv("PGVECTOR_INDEX_NAME", "documents")
+        distance_metric = os.getenv("PGVECTOR_DISTANCE", "cosine")
+        try:
+            # OpenAI 표준인 1536을 기본값으로 사용
+            embedding_dim = int(os.getenv("PGVECTOR_EMBEDDING_DIM", "1536"))
+        except ValueError:
+            embedding_dim = 1536
+        return PgVectorStore(
+            dsn=dsn,
+            index_name=index_name,
+            embedding_dim=embedding_dim,
+            distance_metric=distance_metric,
+        )
     return MockVectorStore()
 
 
@@ -75,10 +102,25 @@ def search(
     """High-level retriever used by graph nodes."""
     if context_texts is None:
         context_texts = []
+    
+    # agents.config 의존성 대신 환경변수 직접 참조
     if top_k is None:
-        top_k = config.TOP_K
+        try:
+            top_k = int(os.getenv("RAG_TOP_K", "3"))
+        except ValueError:
+            top_k = 3
+            
     top_k = _normalize_top_k(top_k)
-    joined = " ".join([query or ""] + [text or "" for text in context_texts]).strip()
+    
+    # 중복 텍스트 합치기 방지
+    query_part = query or ""
+    additional_parts = []
+    for text in (context_texts or []):
+        if text and text not in query_part:
+            additional_parts.append(text)
+            
+    joined = " ".join([query_part] + additional_parts).strip()
+    
     if not joined:
         return []
     try:

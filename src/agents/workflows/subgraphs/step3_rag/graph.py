@@ -22,13 +22,25 @@ logger = logging.getLogger(__name__)
 def _build_query_text(state: AgentState) -> Tuple[str, str, str]:
     question = recent_user_context(state)
     ocr_text = extract_ocr_text(state)
+    
+    # 1. 원본 조합 (LLM 참고용)
     if question and ocr_text:
         combined = f"{question}\n\n[OCR]\n{ocr_text}"
     elif ocr_text:
         combined = ocr_text
     else:
         combined = question
-    return question, ocr_text, combined
+
+    # 2. 검색용 클린 쿼리 생성 (벡터 검색 노이즈 제거)
+    # [OCR] 태그나 "알려줘", "풀어줘" 같은 서술어는 벡터 검색 점수를 낮춥니다.
+    search_query = combined
+    for noise in ["[OCR]", "알려줘", "풀어줘", "설명해줘", "부탁해", "가르쳐줘"]:
+        search_query = search_query.replace(noise, "")
+    
+    # 불필요한 공백/줄바꿈 정리
+    search_query = " ".join(search_query.split()).strip()
+
+    return question, ocr_text, search_query
 
 
 def _coerce_score(value: Any) -> Optional[float]:
@@ -128,9 +140,10 @@ def relevance_check(state: AgentState) -> AgentState:
         score for score in (doc.get("score") for doc in normalized) if score is not None
     ]
     top_score = max(scores) if scores else None
-    has_min_docs = len(normalized) >= config.MIN_DOCS
     score_pass = top_score is not None and top_score >= config.SCORE_THRESHOLD
-    tool_outputs["rag_relevance_passed"] = bool(score_pass or has_min_docs)
+    # 노이즈 문서 주입을 줄이기 위해 score 기반으로만 통과시킨다.
+    has_min_docs = len(normalized) >= config.MIN_DOCS
+    tool_outputs["rag_relevance_passed"] = bool(score_pass)
     rag_meta = tool_outputs.setdefault("rag_meta", {})
     rag_meta.update(
         {

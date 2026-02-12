@@ -45,4 +45,8 @@ test.pdf
 outputs/
 src/service/parse_tokens.py
 
+src/rag/seed_data.py
+src/rag/reset_db.py
+src/rag/debug_similarity.py
+
 

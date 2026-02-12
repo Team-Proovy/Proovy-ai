@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import List
+from typing import Any, List
 
 from langgraph.graph import END, StateGraph
 
@@ -40,6 +40,31 @@ def _ensure_solve_result(state: AgentState) -> SolveResult:
     return solve_result
 
 
+def _build_rag_reference_block(state: AgentState, *, max_docs: int = 3) -> str:
+    tool_outputs = state.get("tool_outputs") or {}
+    docs = tool_outputs.get("retrieved_docs") or []
+    if not isinstance(docs, list) or not docs:
+        return ""
+
+    lines: List[str] = []
+    for idx, doc in enumerate(docs[:max_docs]):
+        if not isinstance(doc, dict):
+            continue
+        title = str(doc.get("title") or f"Document {idx + 1}")
+        text = str(doc.get("text") or doc.get("content") or "").strip()
+        score = doc.get("score")
+        score_text = "N/A"
+        if isinstance(score, (int, float)) and not isinstance(score, bool):
+            score_text = f"{float(score):.3f}"
+        if len(text) > 600:
+            text = text[:600].rstrip() + "..."
+        lines.append(f"[{idx + 1}] {title} (score={score_text})\n{text}")
+
+    if not lines:
+        return ""
+    return "\n\nRetrieved reference docs:\n" + "\n\n".join(lines)
+
+
 def analyze_problem(state: AgentState) -> AgentState:
     print("---FEATURE: SOLVE / ANALYSIS---")
     solve_result = _ensure_solve_result(state)
@@ -73,6 +98,7 @@ def analyze_problem(state: AgentState) -> AgentState:
     context_section = ""
     if conversation_context:
         context_section = f"\n\nPrevious conversation context (for reference if user mentions previous problems):\n{conversation_context}\n"
+    rag_reference_section = _build_rag_reference_block(state)
 
     analysis_prompt = f"""
 User input (may be Korean or English):
@@ -82,6 +108,7 @@ OCR extracted text (if any):
 {ocr_text or "N/A"}
 
 {context_section}
+{rag_reference_section}
 
 Indexed target problem number:
 {indexed_problem_number if indexed_problem_number is not None else "N/A"}
@@ -89,14 +116,16 @@ Indexed target problem number:
 Indexed target problem text:
 {indexed_problem_text or "N/A"}
 
-Task: If indexed target problem text is provided, analyze that problem first. Otherwise analyze the first explicit STEM problem you can find. 
+Task: If indexed target problem text is provided, analyze that problem first. Otherwise analyze the first explicit STEM problem you can find.
 If user refers to a previous problem (e.g., '이전 문제', '방금 푼 문제'), use the conversation context and OCR text to identify it.
+If retrieved reference docs are relevant, prioritize them when identifying the target problem and extracting facts.
 Respond in English.
 """.strip()
 
     system_prompt = (
         "You are a STEM problem analyst. Extract only the first explicit problem. "
         "If the user refers to a previous problem, find it from the conversation context. "
+        "When retrieved reference docs are provided, use them as supporting evidence first. "
         "Return structured JSON with keys: problem, domain, knowns, unknowns, laws, constraints, hints. "
         "Always produce arrays for multi-valued fields and keep all text in concise English."
     )

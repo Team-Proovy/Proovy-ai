@@ -11,6 +11,8 @@
 checkpointer가 저장한 대화 히스토리를 활용하여 멀티턴 대화를 지원한다.
 """
 
+from typing import List
+
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState, ExplainResult
@@ -23,6 +25,31 @@ from agents.workflows.utils import (
     recent_user_context,
     set_difficulty_in_state,
 )
+
+
+def _build_rag_reference_block(state: AgentState, *, max_docs: int = 3) -> str:
+    tool_outputs = state.get("tool_outputs") or {}
+    docs = tool_outputs.get("retrieved_docs") or []
+    if not isinstance(docs, list) or not docs:
+        return ""
+
+    lines: List[str] = []
+    for idx, doc in enumerate(docs[:max_docs]):
+        if not isinstance(doc, dict):
+            continue
+        title = str(doc.get("title") or f"Document {idx + 1}")
+        text = str(doc.get("text") or doc.get("content") or "").strip()
+        score = doc.get("score")
+        score_text = "N/A"
+        if isinstance(score, (int, float)) and not isinstance(score, bool):
+            score_text = f"{float(score):.3f}"
+        if len(text) > 500:
+            text = text[:500].rstrip() + "..."
+        lines.append(f"[{idx + 1}] {title} (score={score_text})\n{text}")
+
+    if not lines:
+        return ""
+    return "\n\n[RAG 참고 문서]\n" + "\n\n".join(lines)
 
 
 def explain(state: AgentState) -> AgentState:
@@ -43,6 +70,7 @@ def explain(state: AgentState) -> AgentState:
 
     # 이전 대화 맥락 수집 (멀티턴 지원)
     conversation_context = get_conversation_summary(state, max_chars=1000)
+    rag_reference_section = _build_rag_reference_block(state)
 
     if user_text:
         # 대화 맥락이 있으면 시스템 프롬프트에 포함
@@ -56,7 +84,8 @@ def explain(state: AgentState) -> AgentState:
         system_prompt = (
             "You are a kind Korean tutor. "
             "Explain the given concept or question in very simple Korean, "
-            "using short sentences and, if helpful, 1-2 easy examples."
+            "using short sentences and, if helpful, 1-2 easy examples. "
+            "If retrieved reference docs are provided, prefer those facts first."
             f"{context_info}"
         )
 
@@ -67,6 +96,7 @@ def explain(state: AgentState) -> AgentState:
 
         user_prompt = (
             f"{history_section}"
+            f"{rag_reference_section}\n\n"
             f"사용자 질문 또는 개념:\n{user_text}\n\n"
             "간단하고 이해하기 쉽게 설명해 주세요."
         )
