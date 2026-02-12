@@ -1,8 +1,10 @@
 import os
 import logging
 import shutil
+import urllib.request
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+from urllib.parse import urlparse, unquote
 
 from pdf2image import convert_from_path
 from pdf2image.exceptions import PDFInfoNotInstalledError
@@ -15,6 +17,48 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 POPPLER_PATH = os.getenv("POPPLER_PATH", None)
+
+
+def is_http_url(uri: Optional[str]) -> bool:
+    """HTTP/HTTPS URL인지 확인"""
+    return isinstance(uri, str) and (
+        uri.startswith("http://") or uri.startswith("https://")
+    )
+
+
+def download_from_url(url: str, target_dir: Path) -> Path:
+    """
+    HTTP/HTTPS URL에서 파일을 다운로드하여 로컬 경로로 반환.
+    S3 presigned URL 또는 일반 공개 URL 모두 지원.
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # URL에서 파일명 추출
+    parsed = urlparse(url)
+    path_part = parsed.path.split("?")[0]  # query string 제거
+    filename = unquote(path_part.split("/")[-1])  # URL 디코딩
+
+    if not filename:
+        filename = "downloaded_file"
+
+    local_path = target_dir / filename
+
+    logger.info(f"Downloading from URL: {url[:100]}... -> {local_path}")
+
+    try:
+        # User-Agent 헤더 추가 (일부 서버에서 필요)
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (Proovy-AI/1.0)"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as response:
+            with open(local_path, "wb") as f:
+                f.write(response.read())
+
+        logger.info(f"Download complete: {local_path}")
+        return local_path
+    except Exception as e:
+        logger.error(f"Failed to download from URL: {url}, error: {e}")
+        raise
 
 
 def get_local_image(ref: str) -> Path:

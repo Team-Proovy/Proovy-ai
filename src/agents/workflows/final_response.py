@@ -21,6 +21,41 @@ from schema.models import OpenRouterModelName
 MODEL_NAME = OpenRouterModelName.GPT_5_MINI
 
 
+def _format_review_message(review_state: dict | None) -> str:
+    """review_state를 사람이 읽기 좋은 한국어 메시지로 변환합니다.
+
+    JSON 형태로 LLM에 전달하면 응답에 그대로 노출되는 문제가 있어,
+    자연스러운 문장 형태로 변환하여 전달합니다.
+    """
+    if not review_state:
+        return ""
+
+    if isinstance(review_state, str):
+        return review_state
+
+    parts: list[str] = []
+
+    # 피드백
+    feedback = review_state.get("feedback")
+    if feedback and feedback != "All deterministic checks passed.":
+        parts.append(f"검토 결과: {feedback}")
+
+    # 제안사항
+    suggestions = review_state.get("suggestions")
+    if suggestions and isinstance(suggestions, list) and any(suggestions):
+        parts.append("개선 제안:")
+        for i, suggestion in enumerate(suggestions, 1):
+            if suggestion:
+                parts.append(f"  {i}. {suggestion}")
+
+    # 검토 사유
+    reasons = review_state.get("reasons")
+    if reasons and isinstance(reasons, list) and any(reasons):
+        parts.append(f"검토 사유: {', '.join(reasons)}")
+
+    return "\n".join(parts) if parts else ""
+
+
 def _last_user_message(state: AgentState) -> str | None:
     messages = state.get("messages") or []
     for msg in reversed(messages):
@@ -56,45 +91,80 @@ def final_response(state: AgentState) -> AgentState:
     partial_responses = state.get("partial_responses", [])
 
     # === 하이브리드 방식: partial_responses 우선 사용 ===
+    # 주의: UI가 /stream의 token 이벤트만 렌더링하는 경우를 위해,
+    # partial_responses가 있어도 최종 문장은 반드시 LLM 호출로 생성한다.
     if partial_responses:
         print(f"Using {len(partial_responses)} partial response(s) from Writer nodes")
 
-        # Writer 노드들이 생성한 부분들을 결합
-        feature_contents = []
+        # Writer 노드들이 생성한 부분들을 구조화해서 전달
+        feature_sections: list[str] = []
         for pr in partial_responses:
-            pr.get("feature", "Unknown")
+            feature = pr.get("feature", "Unknown")
             content = pr.get("content", "")
             if content:
-                feature_contents.append(content)
-
-        # 주요 응답 조합
-        main_response = "\n\n---\n\n".join(feature_contents)
+                feature_sections.append(f"[{feature}]\n{content}")
 
         # Suggestion이 있으면 추가
         suggestion_summary = final_output.get("suggestion_summary")
         suggestion_bullets = final_output.get("suggestion_bullets")
 
-        if suggestion_bullets and isinstance(suggestion_bullets, list):
-            suggestion_text = "\n\n**다음 학습 제안:**\n"
-            suggestion_text += "\n".join(f"- {item}" for item in suggestion_bullets)
-            main_response += suggestion_text
-        elif suggestion_summary:
-            main_response += f"\n\n{suggestion_summary}"
+        user_text = _last_user_message(state) or ""
+        conversation_context = get_conversation_summary(state, max_chars=1500)
 
-        answer_text = main_response.strip()
-        print(f"Final response from partial_responses (length: {len(answer_text)})")
+        prompt_parts: list[str] = []
+        if conversation_context:
+            prompt_parts.append(f"[이전 대화 기록]\n{conversation_context}")
+        if user_text:
+            prompt_parts.append(f"[사용자 질문]\n{user_text}")
+        if feature_sections:
+            prompt_parts.append(
+                "[Writer 부분 응답들]\n" + "\n\n---\n\n".join(feature_sections)
+            )
+        if isinstance(suggestion_bullets, list) and suggestion_bullets:
+            bullets = "\n".join(f"- {item}" for item in suggestion_bullets)
+            prompt_parts.append(f"[다음 학습 제안]\n{bullets}")
+        elif suggestion_summary:
+            prompt_parts.append(f"[다음 학습 제안 요약]\n{suggestion_summary}")
+
+        prompt_parts.append(
+            "위 정보를 바탕으로 사용자에게 보여줄 최종 한국어 답변을 작성해 줘. "
+            "핵심 풀이를 간결하게 정리하고, 마지막에는 '다음 학습 제안' 섹션을 반드시 포함해 줘. "
+            "수식은 필요할 때만 간단한 LaTeX로 표기해도 좋아."
+        )
+
+        system_prompt = (
+            "너는 수학·과학·프로그래밍 문제를 도와주는 한국어 튜터야. "
+            "주어진 부분 응답들을 중복 없이 자연스럽게 통합하고, "
+            "사용자가 다음에 무엇을 공부하면 좋은지 명확히 안내해 줘."
+        )
+        user_prompt = "\n\n".join(prompt_parts)
+        answer_text = call_model(
+            MODEL_NAME, system_prompt, user_prompt, tags=[]
+        ).strip()
+        print(
+            f"Final response from partial_responses via LLM (length: {len(answer_text)})"
+        )
 
     else:
         # === 기존 방식: 전체 final_output을 LLM으로 종합 ===
         print("No partial_responses, using traditional full LLM synthesis")
 
         user_text = _last_user_message(state) or ""
-        serialized_final = json.dumps(final_output, ensure_ascii=False, default=str)
-        serialized_review = (
-            json.dumps(review_state, ensure_ascii=False, default=str)
-            if review_state is not None
-            else ""
-        )
+
+        # OCR 원문(problem)은 응답에 포함하지 않음 - 핵심 결과만 전달
+        filtered_final = {}
+        if isinstance(final_output, dict):
+            # OCR 원문 및 review JSON 관련 필드 제외 (review는 별도 포맷팅)
+            exclude_keys = {"problem", "ocr_text", "ocr_blocks", "raw_ocr", "review"}
+            for k, v in final_output.items():
+                if k not in exclude_keys:
+                    filtered_final[k] = v
+        else:
+            filtered_final = {"raw": str(final_output)}
+
+        serialized_final = json.dumps(filtered_final, ensure_ascii=False, default=str)
+        # review_state는 JSON이 아닌 자연스러운 한국어 메시지로 변환
+        formatted_review = _format_review_message(review_state)
 
         # 이전 대화 맥락 수집 (멀티턴 대화 지원)
         conversation_context = get_conversation_summary(state, max_chars=1500)
@@ -117,8 +187,8 @@ def final_response(state: AgentState) -> AgentState:
             parts.append(f"[사용자 질문]\n{user_text}")
         if serialized_final:
             parts.append(f"[중간 결과 요약(final_output)]\n{serialized_final}")
-        if serialized_review:
-            parts.append(f"[리뷰/재시도 정보(review_state)]\n{serialized_review}")
+        if formatted_review:
+            parts.append(f"[검토 결과]\n{formatted_review}")
 
         parts.append(
             "위 정보를 종합해서, 사용자에게 보여줄 최종 한국어 답변을 작성해 줘. "

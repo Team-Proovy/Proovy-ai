@@ -69,6 +69,64 @@ def _solution_next_suggestions(state: Dict[str, Any]) -> List[str]:
     return []
 
 
+def _solve_next_suggestions(state: Dict[str, Any]) -> List[str]:
+    problems = state.get("problems") or []
+    if not isinstance(problems, list) or not problems:
+        return []
+
+    idx = int(state.get("current_problem_index", 0) or 0)
+    idx = max(0, idx)
+    total = len(problems)
+
+    if idx + 1 < total:
+        next_item = problems[idx + 1]
+        next_number = (next_item or {}).get("number") if isinstance(next_item, dict) else None
+        display_num = next_number if next_number is not None else (idx + 2)
+        return [
+            f"다음 {display_num}번 문제도 풀어드릴까요?",
+            "방금 푼 문제를 다시 설명해드릴까요?",
+        ]
+
+    return ["전체 풀이를 요약해드릴까요?", "유사한 문제를 새로 만들어드릴까요?"]
+
+
+def _diverse_followup_suggestions(state: Dict[str, Any]) -> List[str]:
+    idx = int(state.get("current_problem_index", 0) or 0)
+    pool = [
+        "핵심 개념 3줄 요약으로 복습해볼까요?",
+        "같은 유형 미니 퀴즈 2문제를 풀어볼까요?",
+        "이번 문제의 실수 포인트를 체크해볼까요?",
+        "풀이 전략을 한 단계씩 다시 정리해볼까요?",
+    ]
+    start = idx % len(pool)
+    return [pool[start], pool[(start + 1) % len(pool)]]
+
+
+def _solve_progress_context(state: Dict[str, Any]) -> Dict[str, Any]:
+    problems = state.get("problems") or []
+    if not isinstance(problems, list) or not problems:
+        return {}
+    idx = int(state.get("current_problem_index", 0) or 0)
+    idx = max(0, min(idx, len(problems) - 1))
+    current = idx + 1
+    total = len(problems)
+    current_number = None
+    current_item = problems[idx]
+    if isinstance(current_item, dict):
+        current_number = current_item.get("number")
+    next_number = None
+    if current < total:
+        next_item = problems[current]
+        if isinstance(next_item, dict):
+            next_number = next_item.get("number")
+    return {
+        "current_problem_order": current,
+        "current_problem_number": current_number,
+        "total_problems": total,
+        "next_problem_number": next_number,
+    }
+
+
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     try:
         return json.loads(text)
@@ -203,7 +261,8 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
     print(
         f"---SUGGESTION: MODEL={MODEL_NAME} openrouter_key_set={bool(settings.OPENROUTER_API_KEY)}---"
     )
-    model = get_model(MODEL_NAME)
+    # Suggestion 노드는 구조화 JSON을 내부적으로만 사용하므로 토큰 스트리밍을 비활성화한다.
+    model = get_model(MODEL_NAME).with_config(tags=["skip_stream"])
     review_state = _ensure_dict_review_state(state.get("review_state"))
     last_user_msg = _last_user_message(state.get("messages") or [])
 
@@ -211,6 +270,7 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
     for key in ("solve_result", "explain_result", "graph_result", "solution_result"):
         value = state.get(key)
         feature_summary[key] = None if value is None else _serialize_model_obj(value)
+    solve_progress = _solve_progress_context(state)
 
     prompt = [
         SystemMessage(content=SUGGESTION_SYSTEM_PROMPT),
@@ -218,6 +278,7 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
             content=(
                 f"Review: {json.dumps(review_state, ensure_ascii=False)}\n"
                 f"Last user message: {last_user_msg}\n"
+                f"Solve progress context: {json.dumps(solve_progress, ensure_ascii=False)}\n"
                 f"Feature summary: {json.dumps(feature_summary, ensure_ascii=False, default=str)}\n"
                 f"Return JSON with keys: ai_message, summary, suggestion_bullets."
             )
@@ -239,12 +300,50 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
     summary = suggestion_json.get("summary", suggestion_bullets)
 
     extra_suggestions = _solution_next_suggestions(state)
+    solve_suggestions = _solve_next_suggestions(state)
+    for item in solve_suggestions:
+        if item not in extra_suggestions:
+            extra_suggestions.append(item)
+    for item in _diverse_followup_suggestions(state):
+        if item not in extra_suggestions:
+            extra_suggestions.append(item)
+
+    if solve_progress and solve_progress.get("total_problems", 0) > 1:
+        current = solve_progress.get("current_problem_order")
+        total = solve_progress.get("total_problems")
+        current_number = solve_progress.get("current_problem_number")
+        if current_number is not None:
+            progress_prefix = (
+                f"현재 {total}문제 중 {current}번째(문항 {current_number}번) 문제를 진행 중입니다."
+            )
+        else:
+            progress_prefix = f"현재 {total}문제 중 {current}번째 문제를 진행 중입니다."
+        if progress_prefix not in ai_message_text:
+            ai_message_text = f"{progress_prefix}\n{ai_message_text}"
+
     if extra_suggestions:
         if not isinstance(suggestion_bullets, list):
             suggestion_bullets = []
+        # LLM 제안의 "다음 문제" 계열은 시스템 제안과 충돌하므로 제거한다.
+        next_problem_pattern = re.compile(r"다음\s*(?:\d+\s*번\s*)?문제")
+        suggestion_bullets = [
+            item for item in suggestion_bullets
+            if isinstance(item, str) and not next_problem_pattern.search(item)
+        ]
         for item in extra_suggestions:
             if item not in suggestion_bullets:
                 suggestion_bullets.append(item)
+        # 첫 제안은 항상 "다음 N번 문제..."를 우선 배치하며, 전체 개수를 4개로 제한한다.
+        next_candidates = [
+            item for item in suggestion_bullets
+            if isinstance(item, str) and re.search(r"다음\s*\d+\s*번\s*문제", item)
+        ]
+        if next_candidates:
+            first_next = next_candidates[0]
+            others = [item for item in suggestion_bullets if item != first_next]
+            suggestion_bullets = [first_next] + others[:3]
+        else:
+            suggestion_bullets = suggestion_bullets[:4]
 
     if suggestion_bullets and ai_message_text:
         bullet_lines = "\n".join(f"- {item}" for item in suggestion_bullets)
