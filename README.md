@@ -9,7 +9,7 @@
 - **Orchestration:** LangGraph, LangChain
 - **Vector Database:** PostgreSQL (pgvector)
 - **Monitoring:** Langfuse
-- **Tools:** E2B Code Interpreter (수학/과학 계산용)
+- **Tools:** E2B Code Interpreter
 - **Package Manager:** uv
 
 ## 주요 기능
