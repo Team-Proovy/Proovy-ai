@@ -65,6 +65,29 @@ logging.getLogger("e2b.api").setLevel(logging.WARNING)
 logging.getLogger("e2b.api.client_sync").setLevel(logging.WARNING)
 
 
+def _normalize_auth_token(raw_token: Any) -> str | None:
+    """요청 바디(authToken)에서 받은 값을 Authorization 토큰 형태로 정규화한다."""
+    if raw_token is None:
+        return None
+
+    token = (
+        raw_token.get_secret_value()
+        if hasattr(raw_token, "get_secret_value")
+        else str(raw_token)
+    )
+    token = token.strip()
+    if not token:
+        return None
+
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {"\"", "'"}:
+        token = token[1:-1].strip()
+
+    return token or None
+
+
 def custom_generate_unique_id(route: APIRoute) -> str:
     """Generate idiomatic operation IDs for OpenAPI client generation."""
     return route.name
@@ -202,23 +225,10 @@ async def _handle_input(
         input["chosen_features"] = list(user_input.chosen_features)
 
     # 크레딧 잔액 조회 및 초기 상태 설정
-    raw_token = getattr(user_input, 'auth_token', None)
-    auth_token = raw_token.get_secret_value() if hasattr(raw_token, 'get_secret_value') else raw_token
-    try:
-        credit_service = get_credit_service()
-        balance = await credit_service.get_balance(user_id, token=auth_token)
-        input["credit_state"] = {
-            "balance": balance.total_available,
-            "total_cost": 0,
-            "cost_per_node": {},
-            "difficulty": "easy",
-            "insufficient": False,
-            "stopped_at_feature": None,
-        }
-        logger.info(f"_handle_input: credit_balance={balance.total_available}")
-    except Exception as e:
-        logger.warning(f"Failed to get credit balance: {e}")
-        # 크레딧 조회 실패 시 보수적으로 잔액 0 설정 (무제한 허용 방지)
+    auth_token = _normalize_auth_token(getattr(user_input, "auth_token", None))
+    if auth_token is None:
+        logger.warning("_handle_input: authToken 누락 - credit balance 조회를 건너뜁니다.")
+        # 인증 토큰이 없으면 보수적으로 잔액 0 설정 (무제한 허용 방지)
         input["credit_state"] = {
             "balance": 0,
             "total_cost": 0,
@@ -227,6 +237,30 @@ async def _handle_input(
             "insufficient": True,
             "stopped_at_feature": None,
         }
+    else:
+        try:
+            credit_service = get_credit_service()
+            balance = await credit_service.get_balance(user_id, token=auth_token)
+            input["credit_state"] = {
+                "balance": balance.total_available,
+                "total_cost": 0,
+                "cost_per_node": {},
+                "difficulty": "easy",
+                "insufficient": False,
+                "stopped_at_feature": None,
+            }
+            logger.info(f"_handle_input: credit_balance={balance.total_available}")
+        except Exception as e:
+            logger.warning(f"Failed to get credit balance: {e}")
+            # 크레딧 조회 실패 시 보수적으로 잔액 0 설정 (무제한 허용 방지)
+            input["credit_state"] = {
+                "balance": 0,
+                "total_cost": 0,
+                "cost_per_node": {},
+                "difficulty": "easy",
+                "insufficient": True,
+                "stopped_at_feature": None,
+            }
 
     kwargs = {
         "input": input,
@@ -323,7 +357,7 @@ async def message_generator(
         "RetrievedDocs": "검색된 자료를 컨텍스트에 주입하고 있습니다.",
         "Solve_Analysis": "문제를 분석하고 필요한 정보를 정리하고 있습니다.",
         "Solve_Strategy": "문제 풀이 전략과 코드를 생성하고 있습니다.",
-        "Solve_Computation": "문제에 대한 코드를 실행 중입니다.",
+        "Solve_Computation": "파이썬 코드를 실제로 실행 중입니다.",
         "Solve_Writer": "풀이 결과를 정리하여 답변을 작성하고 있습니다.",
         "Explain": "질문 내용을 쉽게 설명할 방법을 정리하고 있습니다.",
         "Explain_Writer": "개념 설명을 작성하고 있습니다.",
