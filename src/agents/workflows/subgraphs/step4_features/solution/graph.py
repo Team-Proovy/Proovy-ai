@@ -14,7 +14,11 @@ from typing import Any, List, Optional, Tuple
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState, SolutionProgress, SolutionResult
-from agents.tools import E2BExecutionError, run_python_with_e2b
+from agents.tools import (
+    E2BExecutionError,
+    get_user_friendly_error_message,
+    run_python_with_e2b,
+)
 from agents.workflows.utils import call_model, safe_json_loads
 from schema.models import OpenRouterModelName
 
@@ -102,11 +106,12 @@ def _record_pdf_failure(
     stdout_lines: List[str],
     stderr_lines: List[str],
 ) -> None:
-    solution_result.pdf_error = str(exc)
+    friendly_error = get_user_friendly_error_message(exc)
+    solution_result.pdf_error = friendly_error
     tool_outputs["solution_pdf"] = {
         "success": False,
         "stdout": stdout_lines,
-        "stderr": stderr_lines or [str(exc)],
+        "stderr": stderr_lines or [friendly_error],
     }
 
 
@@ -160,7 +165,9 @@ def _request_explanations(
     if len(explanations) < len(problems):
         if isinstance(raw, str):
             tool_outputs["solution_llm_raw"] = raw
-        retry_raw = call_model(OpenRouterModelName.GPT_5_MINI, system_prompt, user_prompt)
+        retry_raw = call_model(
+            OpenRouterModelName.GPT_5_MINI, system_prompt, user_prompt
+        )
         if isinstance(retry_raw, str):
             tool_outputs["solution_llm_retry_raw"] = retry_raw
         retry_explanations, retry_summary = _parse_solution_payload(retry_raw)
@@ -170,7 +177,9 @@ def _request_explanations(
                 chunk_summary = retry_summary
 
     if len(explanations) < len(problems):
-        explanations.extend(["해설을 생성하지 못했습니다."] * (len(problems) - len(explanations)))
+        explanations.extend(
+            ["해설을 생성하지 못했습니다."] * (len(problems) - len(explanations))
+        )
 
     return explanations, chunk_summary
 
@@ -181,8 +190,8 @@ def solution(state: AgentState) -> AgentState:
 
     progress = _ensure_progress(state)
     solution_result = _ensure_solution_result(state)
-    final_output = state.setdefault("final_output", {}) # [Fix] Early initialization
-    
+    final_output = state.setdefault("final_output", {})  # [Fix] Early initialization
+
     problems = state.get("solution_chunks") or _collect_problems(state)
     state["solution_chunks"] = problems
 
@@ -199,12 +208,16 @@ def solution(state: AgentState) -> AgentState:
         state["prev_action"] = "Solution"
         return state
     if progress.done:
-        solution_result.guide = solution_result.guide or "모든 청크가 이미 처리되었습니다."
+        solution_result.guide = (
+            solution_result.guide or "모든 청크가 이미 처리되었습니다."
+        )
         state["solution_result"] = solution_result
         state["prev_action"] = "Solution"
         return state
 
-    current_chunk_index = max(0, min(int(progress.current_chunk or 0), total_chunks - 1))
+    current_chunk_index = max(
+        0, min(int(progress.current_chunk or 0), total_chunks - 1)
+    )
     start = current_chunk_index * chunk_size
     end = min(start + chunk_size, total_problems)
     chunk_problems = problems[start:end]
@@ -215,7 +228,9 @@ def solution(state: AgentState) -> AgentState:
     display_problems = [_render_latex_to_plain(p) for p in chunk_problems]
     display_explanations = [_render_latex_to_plain(e) for e in explanations]
 
-    solution_result.guide = chunk_summary or solution_result.guide or "해설을 생성했습니다."
+    solution_result.guide = (
+        chunk_summary or solution_result.guide or "해설을 생성했습니다."
+    )
     solution_result.chunk_index = current_chunk_index + 1
     solution_result.chunk_size = chunk_size
     solution_result.total_problems = total_problems
@@ -226,15 +241,13 @@ def solution(state: AgentState) -> AgentState:
 
     pdf_file_name = f"solution_chunk_{solution_result.chunk_index}.pdf"
     emit_base64_output = os.getenv("SOLUTION_EMIT_PDF_BASE64") == "1"
-    emit_base64_e2b = (
-        os.getenv("SOLUTION_E2B_EMIT_BASE64", "1").strip().lower()
-        not in {"0", "false", "no", "off"}
-    )
-    
-    render_latex_enabled = (
-        os.getenv("SOLUTION_USE_MATH_RENDER", "0").strip().lower()
-        in {"1", "true", "yes", "on"}
-    )
+    emit_base64_e2b = os.getenv(
+        "SOLUTION_E2B_EMIT_BASE64", "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+
+    render_latex_enabled = os.getenv(
+        "SOLUTION_USE_MATH_RENDER", "0"
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
     font_urls_env = os.getenv("SOLUTION_FONT_URLS")
     if font_urls_env:
@@ -284,7 +297,7 @@ def solution(state: AgentState) -> AgentState:
     install_deps_env = os.getenv("SOLUTION_E2B_INSTALL_DEPS")
     if install_deps_env:
         sandbox_envs["SOLUTION_E2B_INSTALL_DEPS"] = install_deps_env
-    
+
     use_math_render_env = os.getenv("SOLUTION_USE_MATH_RENDER")
     sandbox_envs["SOLUTION_USE_MATH_RENDER"] = use_math_render_env or "1"
     render_math_plain_env = os.getenv("SOLUTION_RENDER_MATH_AS_PLAIN")
@@ -296,7 +309,11 @@ def solution(state: AgentState) -> AgentState:
         sandbox_envs["SOLUTION_SVG_INSTALL_DEPS"] = svg_install_env
 
     install_deps = os.getenv("SOLUTION_E2B_INSTALL_DEPS", "").strip().lower() in {
-        "1", "true", "yes", "y", "on",
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
     }
     timeout_env = os.getenv("SOLUTION_E2B_TIMEOUT")
     timeout = None
@@ -310,7 +327,7 @@ def solution(state: AgentState) -> AgentState:
     request_timeout = timeout + 60.0 if timeout else None
     reuse_env = os.getenv("SOLUTION_E2B_REUSE", "").strip().lower()
     reuse_sandbox = reuse_env not in {"0", "false", "no", "off"}
-    
+
     attempts: List[Tuple[dict[str, str], bool]] = [(sandbox_envs, reuse_sandbox)]
     if reuse_sandbox:
         attempts.append((sandbox_envs, False))
@@ -431,10 +448,9 @@ def solution(state: AgentState) -> AgentState:
             pass
 
     if not pdf_success:
-        local_fallback_enabled = (
-            os.getenv("SOLUTION_LOCAL_FALLBACK", "1").strip().lower()
-            not in {"0", "false", "no", "off"}
-        )
+        local_fallback_enabled = os.getenv(
+            "SOLUTION_LOCAL_FALLBACK", "1"
+        ).strip().lower() not in {"0", "false", "no", "off"}
         if local_fallback_enabled:
             local_payload = dict(pdf_payload)
             local_payload["pdf_path"] = _resolve_local_pdf_path(pdf_file_name)
@@ -480,7 +496,7 @@ def solution(state: AgentState) -> AgentState:
                     pdf_success = True
                     pdf_error = None
                     solution_result.pdf_error = None
-                    
+
                     final_output["final_answer"] = (
                         f"요청하신 해설지 PDF 생성을 완료했습니다.\n\n"
                         f"파일 정보\n"
@@ -531,11 +547,19 @@ def solution(state: AgentState) -> AgentState:
         "remaining_count": remaining_count,
     }
     if tool_outputs.get("solution_pdf"):
-        final_output["solution"]["pdf_font"] = tool_outputs["solution_pdf"].get("pdf_font")
-        final_output["solution"]["pdf_font_path"] = tool_outputs["solution_pdf"].get("pdf_font_path")
-        final_output["solution"]["pdf_font_loaded"] = tool_outputs["solution_pdf"].get("pdf_font_loaded")
+        final_output["solution"]["pdf_font"] = tool_outputs["solution_pdf"].get(
+            "pdf_font"
+        )
+        final_output["solution"]["pdf_font_path"] = tool_outputs["solution_pdf"].get(
+            "pdf_font_path"
+        )
+        final_output["solution"]["pdf_font_loaded"] = tool_outputs["solution_pdf"].get(
+            "pdf_font_loaded"
+        )
     if emit_base64_output:
-        final_output["solution"]["pdf_base64"] = tool_outputs.get("solution_pdf", {}).get("pdf_base64")
+        final_output["solution"]["pdf_base64"] = tool_outputs.get(
+            "solution_pdf", {}
+        ).get("pdf_base64")
     if not progress.done:
         next_batch = min(chunk_size, remaining_count) if remaining_count else chunk_size
         final_output["solution"]["suggestions"] = [

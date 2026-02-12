@@ -14,7 +14,11 @@ from agents.state import (
     SolveResult,
     SolveStrategy,
 )
-from agents.tools import E2BExecutionError, run_python_with_e2b
+from agents.tools import (
+    E2BExecutionError,
+    get_user_friendly_error_message,
+    run_python_with_e2b,
+)
 from agents.workflows.utils import (
     call_model,
     call_model_by_difficulty,
@@ -89,7 +93,7 @@ Indexed target problem number:
 Indexed target problem text:
 {indexed_problem_text or "N/A"}
 
-Task: If indexed target problem text is provided, analyze that problem first. Otherwise analyze the first explicit STEM problem you can find. 
+Task: If indexed target problem text is provided, analyze that problem first. Otherwise analyze the first explicit STEM problem you can find.
 If user refers to a previous problem (e.g., '이전 문제', '방금 푼 문제'), use the conversation context and OCR text to identify it.
 Respond in English.
 """.strip()
@@ -209,7 +213,7 @@ def execute_strategy(state: AgentState) -> AgentState:
     except E2BExecutionError as exc:
         success = False
         stdout = []
-        stderr = [str(exc)]
+        stderr = [get_user_friendly_error_message(exc)]
         text_output = None
         if exc.execution:
             text_output = getattr(exc.execution, "text", None) or text_output
