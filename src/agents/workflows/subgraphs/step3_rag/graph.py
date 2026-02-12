@@ -5,16 +5,18 @@ EmbeddingSearch → RelevanceCheck → RetrievedDocs 흐름의 뼈대입니다.
 
 from typing import Any, Dict, List, Optional, Tuple
 import logging
+import os
 from time import perf_counter
 
 from langgraph.graph import END, StateGraph
 from pydantic import ValidationError
 
 from agents.state import AgentState
-from agents.workflows.utils import extract_ocr_text, recent_user_context
+from agents.workflows.utils import call_model, extract_ocr_text, recent_user_context
 from agents.workflows.subgraphs.step3_rag import config
 from agents.workflows.subgraphs.step3_rag.types import RetrievedDoc, RetrievedDocModel
 from rag.retriever import search as retriever_search
+from schema.models import OpenRouterModelName
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,35 @@ def _build_query_text(state: AgentState) -> Tuple[str, str, str]:
     search_query = " ".join(search_query.split()).strip()
 
     return question, ocr_text, search_query
+
+
+def _expand_query_with_llm(query: str) -> str:
+    """Rewrite query for retrieval without domain hard-coding."""
+    if not query:
+        return query
+    if os.getenv("RAG_QUERY_EXPANSION", "1").lower() not in {"1", "true", "yes"}:
+        return query
+    system_prompt = (
+        "You rewrite search queries for semantic retrieval. "
+        "Keep the original intent, add key technical terms, formulas, and close synonyms. "
+        "Return one concise line only. No explanations."
+    )
+    user_prompt = (
+        "Rewrite this query for retrieval.\n"
+        f"Original: {query}\n"
+        "Output only the rewritten query."
+    )
+    try:
+        rewritten = call_model(
+            OpenRouterModelName.GPT_5_MINI,
+            system_prompt,
+            user_prompt,
+            tags=["skip_stream"],
+        ).strip()
+        return rewritten or query
+    except Exception:
+        logger.exception("RAG query expansion failed; falling back to original query")
+        return query
 
 
 def _coerce_score(value: Any) -> Optional[float]:
@@ -104,7 +135,8 @@ def embedding_search(state: AgentState) -> AgentState:
     question, ocr_text, combined = _build_query_text(state)
     tool_outputs = state.setdefault("tool_outputs", {})
     context_texts = [ocr_text] if ocr_text else []
-    query = (combined or question or "").strip()
+    base_query = (combined or question or "").strip()
+    query = _expand_query_with_llm(base_query)
     start = perf_counter()
     try:
         docs = retriever_search(
@@ -119,7 +151,11 @@ def embedding_search(state: AgentState) -> AgentState:
     tool_outputs["retrieved_docs"] = docs
     rag_meta = tool_outputs.setdefault("rag_meta", {})
     rag_meta.update(
-        {"retrieved_count": len(docs), "embedding_latency_ms": elapsed_ms}
+        {
+            "retrieved_count": len(docs),
+            "embedding_latency_ms": elapsed_ms,
+            "query_expanded": query != base_query,
+        }
     )
     logger.info("[RAG] EmbeddingSearch done: count=%s elapsed_ms=%s", len(docs), elapsed_ms)
     return state

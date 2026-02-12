@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, TypedDict
 
 from core.settings import settings
@@ -18,6 +19,65 @@ class RetrievedDoc(TypedDict):
     text: str
     score: Optional[float]
     metadata: Dict[str, Any]
+
+
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9가-힣]+")
+
+
+def _tokenize(text: str) -> set[str]:
+    if not text:
+        return set()
+    return {
+        token.lower()
+        for token in _TOKEN_PATTERN.findall(text)
+        if len(token.strip()) >= 2
+    }
+
+
+def _coerce_weight(value: str, default: float) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, v))
+
+
+def _hybrid_rerank(query: str, docs: List[RetrievedDoc]) -> List[RetrievedDoc]:
+    """Generic rerank: vector score + lexical overlap (no subject hard-coding)."""
+    if not docs:
+        return docs
+    if os.getenv("RAG_HYBRID_RERANK", "1").lower() not in {"1", "true", "yes"}:
+        return docs
+
+    vector_weight = _coerce_weight(os.getenv("RAG_VECTOR_WEIGHT", "0.75"), 0.75)
+    lexical_weight = _coerce_weight(os.getenv("RAG_LEXICAL_WEIGHT", "0.25"), 0.25)
+    if vector_weight + lexical_weight <= 0:
+        return docs
+
+    q_tokens = _tokenize(query)
+    reranked: List[RetrievedDoc] = []
+    for doc in docs:
+        text = str(doc.get("text") or "")
+        title = str(doc.get("title") or "")
+        d_tokens = _tokenize(f"{title} {text}")
+        lexical_score = 0.0
+        if q_tokens and d_tokens:
+            lexical_score = len(q_tokens & d_tokens) / max(len(q_tokens), 1)
+
+        vector_score = _coerce_score(doc.get("score")) or 0.0
+        hybrid_score = (vector_weight * vector_score) + (lexical_weight * lexical_score)
+
+        merged: RetrievedDoc = dict(doc)  # type: ignore[assignment]
+        meta = merged.get("metadata")
+        meta = dict(meta) if isinstance(meta, dict) else {}
+        meta["hybrid_vector_score"] = vector_score
+        meta["hybrid_lexical_score"] = lexical_score
+        merged["metadata"] = meta
+        merged["score"] = hybrid_score
+        reranked.append(merged)
+
+    reranked.sort(key=lambda item: _coerce_score(item.get("score")) or 0.0, reverse=True)
+    return reranked
 
 
 def _create_vector_store() -> BaseVectorStore:
@@ -136,5 +196,7 @@ def search(
     if not isinstance(raw_docs, list):
         logger.warning("retriever search returned non-list docs")
         return []
-    return [_validate_doc_shape(doc) for doc in raw_docs if isinstance(doc, dict)]
+    normalized = [_validate_doc_shape(doc) for doc in raw_docs if isinstance(doc, dict)]
+    reranked = _hybrid_rerank(joined, normalized)
+    return reranked[:top_k]
 
