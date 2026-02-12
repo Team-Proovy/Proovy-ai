@@ -54,7 +54,7 @@ from service.utils import (
     langchain_to_chat_message,
     remove_tool_calls,
 )
-from service.credit_service import get_credit_service
+from service.credit_service import get_credit_service, normalize_auth_token
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
@@ -63,29 +63,6 @@ logger = logging.getLogger(__name__)
 # HTTP requests don't look like errors in the service logs.
 logging.getLogger("e2b.api").setLevel(logging.WARNING)
 logging.getLogger("e2b.api.client_sync").setLevel(logging.WARNING)
-
-
-def _normalize_auth_token(raw_token: Any) -> str | None:
-    """요청 바디(authToken)에서 받은 값을 Authorization 토큰 형태로 정규화한다."""
-    if raw_token is None:
-        return None
-
-    token = (
-        raw_token.get_secret_value()
-        if hasattr(raw_token, "get_secret_value")
-        else str(raw_token)
-    )
-    token = token.strip()
-    if not token:
-        return None
-
-    if token.lower().startswith("bearer "):
-        token = token[7:].strip()
-
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in {"\"", "'"}:
-        token = token[1:-1].strip()
-
-    return token or None
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:
@@ -225,15 +202,10 @@ async def _handle_input(
         input["chosen_features"] = list(user_input.chosen_features)
 
     # 크레딧 잔액 조회 및 초기 상태 설정
-    raw_token = getattr(user_input, "auth_token", None)
-    auth_token = (
-        raw_token.get_secret_value()
-        if hasattr(raw_token, "get_secret_value")
-        else raw_token
-    )
+    auth_token = normalize_auth_token(getattr(user_input, "auth_token", None))
 
     try:
-        credit_service = await get_credit_service()  # await를 추가하여 비동기 호출
+        credit_service = get_credit_service()
         balance = await credit_service.get_balance(user_id, token=auth_token)
         input["credit_state"] = {
             "balance": balance.total_available,
@@ -263,13 +235,13 @@ async def _handle_input(
     return kwargs, run_id, thread_id
 
 
-@app.post("/{agent_id}/invoke", operation_id="invoke_with_agent_id")
-@app.post("/invoke")
+@router.post("/{agent_id}/invoke", operation_id="invoke_with_agent_id")
+@router.post("/invoke")
 async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMessage:
     """
     Invoke an agent with user input to retrieve a final response.
     """
-    agent: AgentGraph = await get_agent(agent_id)  # 비동기 처리
+    agent: AgentGraph = get_agent(agent_id)
     kwargs, run_id, _thread_id = await _handle_input(user_input, agent)
 
     try:
@@ -300,7 +272,7 @@ async def message_generator(
     """
     Generate a stream of messages from the agent.
     """
-    agent: AgentGraph = await get_agent(agent_id)  # 비동기 호출
+    agent: AgentGraph = get_agent(agent_id)
     kwargs, run_id, thread_id = await _handle_input(user_input, agent)
 
     thread_id_event = {

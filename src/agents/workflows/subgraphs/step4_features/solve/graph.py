@@ -77,15 +77,8 @@ def _run_python_locally(
             "USERPROFILE",
             "TMP",
             "TEMP",
-            "PYTHONPATH",
             "PYTHONHOME",
         }
-        allowlist = os.getenv("SOLVE_LOCAL_PYTHON_ENV_ALLOWLIST", "").strip()
-        if allowlist:
-            for key in allowlist.split(","):
-                normalized = key.strip()
-                if normalized:
-                    allowed_env_keys.add(normalized)
         for key in allowed_env_keys:
             value = os.environ.get(key)
             if value is not None:
