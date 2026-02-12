@@ -26,8 +26,8 @@ def normalize_auth_token(token: Any) -> str | None:
     if not value:
         return None
 
-    # "Bearer <token>" 형태로 들어와도 중복 prefix를 붙이지 않도록 제거
-    if value.lower().startswith("bearer "):
+    # "Bearer Bearer <token>"처럼 중복 prefix가 붙어 있어도 모두 제거
+    while value.lower().startswith("bearer "):
         value = value[7:].strip()
 
     # 문자열로 감싼 값('"token"' 또는 "'token'") 방어

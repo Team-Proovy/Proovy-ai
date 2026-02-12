@@ -312,6 +312,23 @@ async def message_generator(
         "Review": "전체 풀이 결과를 자동으로 리뷰하고 있습니다.",
         "Suggestion": "다음 학습 방향에 대한 제안을 준비하고 있습니다.",
     }
+    emitted_progress_nodes: set[str] = set()
+
+    def emit_progress(node_name: str) -> str | None:
+        if node_name in emitted_progress_nodes:
+            return None
+        message = progress_messages.get(node_name)
+        if message is None:
+            return None
+        emitted_progress_nodes.add(node_name)
+        return (
+            "data: "
+            + json.dumps(
+                {"type": "progress", "node": node_name, "content": message},
+                ensure_ascii=False,
+            )
+            + "\n\n"
+        )
 
     try:
         async for stream_event in agent.astream(
@@ -371,9 +388,12 @@ async def message_generator(
                             credit_usage["total_cost"] = cs.get("total_cost", 0)
 
                     update_messages = updates.get("messages", [])
-                    if "supervisor" in node or "sub-agent" in node:
-                        if isinstance(update_messages[-1], ToolMessage):
-                            if "sub-agent" in node and len(update_messages) > 1:
+                    node_text = str(node)
+                    if "supervisor" in node_text or "sub-agent" in node_text:
+                        if not update_messages:
+                            update_messages = []
+                        elif isinstance(update_messages[-1], ToolMessage):
+                            if "sub-agent" in node_text and len(update_messages) > 1:
                                 update_messages = update_messages[-2:]
                             else:
                                 update_messages = [update_messages[-1]]
