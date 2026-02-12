@@ -284,32 +284,6 @@ def execute_strategy(state: AgentState) -> AgentState:
         stderr = execution.stderr
         text_output = execution.text
     except E2BExecutionError as exc:
-<<<<<<< HEAD
-        # Security default: local execution of model-generated code is opt-in only.
-        allow_local_fallback = _env_truthy("SOLVE_LOCAL_PYTHON_FALLBACK", "0")
-        if allow_local_fallback:
-            execution_backend = "local"
-            local_ok, local_stdout, local_stderr, local_text, local_error = (
-                _run_python_locally(code)
-            )
-            success = local_ok
-            stdout = local_stdout
-            stderr = list(local_stderr)
-            if local_error:
-                stderr.append(f"Local execution error: {local_error}")
-            stderr.append(f"E2B fallback reason: {str(exc)}")
-            text_output = local_text
-        else:
-            success = False
-            stdout = []
-            stderr = [str(exc)]
-            text_output = None
-            if exc.execution:
-                text_output = getattr(exc.execution, "text", None) or text_output
-                if getattr(exc.execution, "logs", None):
-                    stdout.extend(getattr(exc.execution.logs, "stdout", []))
-                    stderr.extend(getattr(exc.execution.logs, "stderr", []))
-=======
         success = False
         stdout = []
         stderr = [get_user_friendly_error_message(exc)]
@@ -319,8 +293,24 @@ def execute_strategy(state: AgentState) -> AgentState:
             if getattr(exc.execution, "logs", None):
                 stdout.extend(getattr(exc.execution.logs, "stdout", []))
                 stderr.extend(getattr(exc.execution.logs, "stderr", []))
->>>>>>> bb3aec58c250ab5c2aab70f253c227e3f17f9a8a
-
+        else:
+            # Fall back to local execution if E2B fails and fallback is allowed
+            allow_local_fallback = _env_truthy("SOLVE_LOCAL_PYTHON_FALLBACK", "1")
+            if allow_local_fallback:
+                execution_backend = "local"
+                local_ok, local_stdout, local_stderr, local_text, local_error = (
+                    _run_python_locally(code)
+                )
+                success = local_ok
+                stdout = local_stdout
+                stderr = list(local_stderr)
+                if local_error:
+                    stderr.append(f"Local execution error: {local_error}")
+                stderr.append(f"E2B fallback reason: {str(exc)}")
+                text_output = local_text
+            else:
+                stderr.append(f"Execution error: {str(exc)}")
+    
     execution_summary = ComputationSummary(
         success=success,
         stdout=stdout,
