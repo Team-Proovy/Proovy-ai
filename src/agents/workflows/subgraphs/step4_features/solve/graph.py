@@ -64,9 +64,32 @@ def _run_python_locally(
             handle.write(code)
             temp_file = handle.name
 
+        runtime_env: dict[str, str] = {"PYTHONIOENCODING": "utf-8"}
+        allowed_env_keys = {
+            "PATH",
+            "SYSTEMROOT",
+            "WINDIR",
+            "HOME",
+            "USERPROFILE",
+            "TMP",
+            "TEMP",
+            "PYTHONPATH",
+            "PYTHONHOME",
+        }
+        allowlist = os.getenv("SOLVE_LOCAL_PYTHON_ENV_ALLOWLIST", "").strip()
+        if allowlist:
+            for key in allowlist.split(","):
+                normalized = key.strip()
+                if normalized:
+                    allowed_env_keys.add(normalized)
+        for key in allowed_env_keys:
+            value = os.environ.get(key)
+            if value is not None:
+                runtime_env[key] = value
+
         result = subprocess.run(
             [sys.executable, temp_file],
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            env=runtime_env,
             capture_output=True,
             text=False,
             timeout=timeout,
@@ -232,7 +255,8 @@ def execute_strategy(state: AgentState) -> AgentState:
         stderr = execution.stderr
         text_output = execution.text
     except E2BExecutionError as exc:
-        allow_local_fallback = _env_truthy("SOLVE_LOCAL_PYTHON_FALLBACK", "1")
+        # Security default: local execution of model-generated code is opt-in only.
+        allow_local_fallback = _env_truthy("SOLVE_LOCAL_PYTHON_FALLBACK", "0")
         if allow_local_fallback:
             execution_backend = "local"
             local_ok, local_stdout, local_stderr, local_text, local_error = (
