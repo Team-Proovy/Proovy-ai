@@ -321,10 +321,19 @@ async def message_generator(
         if message is None:
             return None
         emitted_progress_nodes.add(node_name)
+
+        # ChatMessage 형태로 생성하여 message 타입으로 전송
+        progress = ChatMessage(
+            type="custom",
+            content="",
+            custom_data={"node": node_name, "status": message}
+        )
+        progress.run_id = str(run_id)
+
         return (
             "data: "
             + json.dumps(
-                {"type": "progress", "node": node_name, "content": message},
+                {"type": "message", "content": progress.model_dump()},
                 ensure_ascii=False,
             )
             + "\n\n"
@@ -432,6 +441,26 @@ async def message_generator(
                 if chat_message.type == "human" and chat_message.content == user_input.message:
                     continue
                 yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()}, ensure_ascii=False)}\n\n"
+
+            if stream_mode == "messages":
+                # LangGraph가 LLM 토큰을 messages 스트림으로 전달해 줄 때,
+                # 여기서는 node_path에 관계없이 토큰을 그대로 클라이언트로 전달한다.
+                # (중간 노드에서의 불필요한 스트리밍은 그래프 쪽의 nostream 태그로 제어함)
+                if not user_input.stream_tokens:
+                    continue
+                msg, metadata = event
+                if "skip_stream" in metadata.get("tags", []):
+                    continue
+                # For some reason, astream("messages") causes non-LLM nodes to send extra messages.
+                # Drop them.
+                if not isinstance(msg, AIMessageChunk):
+                    continue
+                content = remove_tool_calls(msg.content)
+                if content:
+                    # Empty content in the context of OpenAI usually means
+                    # that the model is asking for a tool to be invoked.
+                    # So we only print non-empty content.
+                    yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)}, ensure_ascii=False)}\n\n"
 
     except Exception:
         logger.exception("Error in message generator")

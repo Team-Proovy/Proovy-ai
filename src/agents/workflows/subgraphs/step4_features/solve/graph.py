@@ -287,8 +287,8 @@ def execute_strategy(state: AgentState) -> AgentState:
                 stdout.extend(getattr(exc.execution.logs, "stdout", []))
                 stderr.extend(getattr(exc.execution.logs, "stderr", []))
         else:
-            # Fall back to local execution if E2B fails and fallback is allowed
-            allow_local_fallback = _env_truthy("SOLVE_LOCAL_PYTHON_FALLBACK", "1")
+            # Security default: local execution of model-generated code is opt-in only.
+            allow_local_fallback = _env_truthy("SOLVE_LOCAL_PYTHON_FALLBACK", "0")
             if allow_local_fallback:
                 execution_backend = "local"
                 local_ok, local_stdout, local_stderr, local_text, local_error = (
