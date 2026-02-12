@@ -54,7 +54,7 @@ from service.utils import (
     langchain_to_chat_message,
     remove_tool_calls,
 )
-from service.credit_service import get_credit_service, CreditService
+from service.credit_service import get_credit_service
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
@@ -101,10 +101,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await store.setup()
 
             # Checkpointer를 agents에 주입 (멀티턴 대화 지원)
+            # saver가 None인 경우에도 set_checkpointer를 호출하여 agents가 checkpointer 없이 동작하도록 함
             from agents.agents import set_checkpointer
 
             set_checkpointer(saver)
-            logger.info("Checkpointer injected into agents")
+            if saver is not None:
+                logger.info("Checkpointer injected into agents")
+            else:
+                logger.warning(
+                    "Running without checkpointer - conversation history will not be persisted"
+                )
 
             # Configure agents with both memory components and async loading
             get_all_agent_info()
@@ -202,8 +208,12 @@ async def _handle_input(
         input["chosen_features"] = list(user_input.chosen_features)
 
     # 크레딧 잔액 조회 및 초기 상태 설정
-    raw_token = getattr(user_input, 'auth_token', None)
-    auth_token = raw_token.get_secret_value() if hasattr(raw_token, 'get_secret_value') else raw_token
+    raw_token = getattr(user_input, "auth_token", None)
+    auth_token = (
+        raw_token.get_secret_value()
+        if hasattr(raw_token, "get_secret_value")
+        else raw_token
+    )
     try:
         credit_service = get_credit_service()
         balance = await credit_service.get_balance(user_id, token=auth_token)
@@ -399,7 +409,14 @@ async def message_generator(
                         yield progress_line  # type: ignore[misc]
 
                     # Feature 노드 실행 추적 (크레딧 차감용)
-                    feature_nodes = {"Solve", "Explain", "CreateGraph", "Variant", "Solution", "Check"}
+                    feature_nodes = {
+                        "Solve",
+                        "Explain",
+                        "CreateGraph",
+                        "Variant",
+                        "Solution",
+                        "Check",
+                    }
                     feature_name = node_name
                     if node_path:
                         try:
@@ -410,7 +427,10 @@ async def message_generator(
                                 feature_name = path_str.split("/")[0]
                         except Exception:
                             pass
-                    if feature_name in feature_nodes and feature_name not in credit_usage["used_features"]:
+                    if (
+                        feature_name in feature_nodes
+                        and feature_name not in credit_usage["used_features"]
+                    ):
                         credit_usage["used_features"].append(feature_name)
                         logger.info(f"Feature executed: {feature_name}")
 

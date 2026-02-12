@@ -106,14 +106,28 @@ def final_response(state: AgentState) -> AgentState:
         answer_text = call_model(
             MODEL_NAME, system_prompt, user_prompt, tags=[]
         ).strip()
-        print(f"Final response from partial_responses via LLM (length: {len(answer_text)})")
+        print(
+            f"Final response from partial_responses via LLM (length: {len(answer_text)})"
+        )
 
     else:
         # === 기존 방식: 전체 final_output을 LLM으로 종합 ===
         print("No partial_responses, using traditional full LLM synthesis")
 
         user_text = _last_user_message(state) or ""
-        serialized_final = json.dumps(final_output, ensure_ascii=False, default=str)
+
+        # OCR 원문(problem)은 응답에 포함하지 않음 - 핵심 결과만 전달
+        filtered_final = {}
+        if isinstance(final_output, dict):
+            # OCR 원문 관련 필드 제외
+            exclude_keys = {"problem", "ocr_text", "ocr_blocks", "raw_ocr"}
+            for k, v in final_output.items():
+                if k not in exclude_keys:
+                    filtered_final[k] = v
+        else:
+            filtered_final = {"raw": str(final_output)}
+
+        serialized_final = json.dumps(filtered_final, ensure_ascii=False, default=str)
         serialized_review = (
             json.dumps(review_state, ensure_ascii=False, default=str)
             if review_state is not None
