@@ -43,25 +43,47 @@ def _healthcheck_sandbox(sandbox: Sandbox) -> bool:
     return True
 
 
+def _dispose_sandbox(sandbox: Sandbox | None) -> None:
+    if sandbox is None:
+        return
+
+    # E2B SDK 버전에 따라 종료 메서드 명이 다를 수 있어 kill/close 순으로 시도한다.
+    for method_name in ("kill", "close"):
+        method = getattr(sandbox, method_name, None)
+        if callable(method):
+            try:
+                method()
+                return
+            except Exception:
+                continue
+
+
 def _reset_reused_sandbox() -> None:
     global _SANDBOX, _SANDBOX_LAST_USED_AT
+    sandbox_to_dispose: Sandbox | None = None
     with _SANDBOX_LOCK:
+        sandbox_to_dispose = _SANDBOX
         _SANDBOX = None
         _SANDBOX_LAST_USED_AT = None
+    _dispose_sandbox(sandbox_to_dispose)
 
 
 def _get_sandbox(api_key: str, *, reuse: bool) -> Sandbox:
     global _SANDBOX, _SANDBOX_LAST_USED_AT
     if not reuse:
         return Sandbox.create(api_key=api_key)
+    stale_sandbox: Sandbox | None = None
     with _SANDBOX_LOCK:
         if _SANDBOX is not None and _is_sandbox_stale() and not _healthcheck_sandbox(_SANDBOX):
+            stale_sandbox = _SANDBOX
             _SANDBOX = None
             _SANDBOX_LAST_USED_AT = None
 
         if _SANDBOX is None:
             _SANDBOX = Sandbox.create(api_key=api_key)
-        return _SANDBOX
+        sandbox = _SANDBOX
+    _dispose_sandbox(stale_sandbox)
+    return sandbox
 
 
 class E2BExecutionError(RuntimeError):
