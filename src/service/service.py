@@ -245,7 +245,9 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
     kwargs, run_id, _thread_id = await _handle_input(user_input, agent)
 
     try:
-        response_events: list[tuple[str, Any]] = await agent.ainvoke(**kwargs, stream_mode=["updates", "values"])
+        response_events: list[tuple[str, Any]] = await agent.ainvoke(
+            **kwargs, stream_mode=["updates", "values"]
+        )
         response_type, response = response_events[-1]
         if response_type == "values":
             output = langchain_to_chat_message(response["messages"][-1])
@@ -326,7 +328,7 @@ async def message_generator(
         progress = ChatMessage(
             type="custom",
             content="",
-            custom_data={"node": node_name, "status": message}
+            custom_data={"node": node_name, "status": message},
         )
         progress.run_id = str(run_id)
 
@@ -384,7 +386,10 @@ async def message_generator(
                                 feature_name = path_str.split("/")[0]
                         except Exception:
                             pass
-                    if feature_name in feature_nodes and feature_name not in credit_usage["used_features"]:
+                    if (
+                        feature_name in feature_nodes
+                        and feature_name not in credit_usage["used_features"]
+                    ):
                         credit_usage["used_features"].append(feature_name)
                         logger.info(f"Feature executed: {feature_name}")
 
@@ -409,8 +414,12 @@ async def message_generator(
                         else:
                             update_messages = []
 
+                    # FinalResponse 노드의 메시지 전송:
+                    # - stream_tokens=True일 때: 토큰 스트리밍(messages)으로 이미 전송되므로 건너뜀
+                    # - stream_tokens=False일 때: updates에서 최종 응답을 전송해야 함
                     if node_name == "FinalResponse" and update_messages:
-                        new_messages.extend(update_messages)
+                        if not user_input.stream_tokens:
+                            new_messages.extend(update_messages)
 
             if stream_mode == "custom":
                 new_messages = [event]
@@ -438,7 +447,10 @@ async def message_generator(
                     logger.error(f"Error parsing message: {e}")
                     yield f"data: {json.dumps({'type': 'error', 'content': 'Unexpected error'}, ensure_ascii=False)}\n\n"
                     continue
-                if chat_message.type == "human" and chat_message.content == user_input.message:
+                if (
+                    chat_message.type == "human"
+                    and chat_message.content == user_input.message
+                ):
                     continue
                 yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()}, ensure_ascii=False)}\n\n"
 
