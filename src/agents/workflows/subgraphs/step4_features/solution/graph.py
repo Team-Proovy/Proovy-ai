@@ -159,14 +159,14 @@ def _request_explanations(
     tool_outputs: dict,
 ) -> Tuple[List[str], Optional[str]]:
     system_prompt, user_prompt = _build_solution_prompts(problems)
-    raw = call_model(OpenRouterModelName.GPT_5_MINI, system_prompt, user_prompt)
+    raw = call_model(OpenRouterModelName.GPT_5_MINI, system_prompt, user_prompt, tags=[])
     explanations, chunk_summary = _parse_solution_payload(raw)
 
     if len(explanations) < len(problems):
         if isinstance(raw, str):
             tool_outputs["solution_llm_raw"] = raw
         retry_raw = call_model(
-            OpenRouterModelName.GPT_5_MINI, system_prompt, user_prompt
+            OpenRouterModelName.GPT_5_MINI, system_prompt, user_prompt, tags=[]
         )
         if isinstance(retry_raw, str):
             tool_outputs["solution_llm_retry_raw"] = retry_raw
@@ -227,6 +227,14 @@ def solution(state: AgentState) -> AgentState:
     explanations = _align_explanations_to_problems(chunk_problems, explanations)
     display_problems = [_render_latex_to_plain(p) for p in chunk_problems]
     display_explanations = [_render_latex_to_plain(e) for e in explanations]
+
+    # AIMessage를 messages에 추가하여 즉시 스트리밍 및 상태 저장
+    from langchain_core.messages import AIMessage
+    formatted_content = f"{chunk_summary or '해설을 생성했습니다.'}\n\n"
+    for i, (prob, expl) in enumerate(zip(display_problems, display_explanations), 1):
+        formatted_content += f"**문제 {i}:**\n{prob}\n\n**해설:**\n{expl}\n\n"
+    ai_msg = AIMessage(content=formatted_content.strip())
+    state["messages"] = (state.get("messages") or []) + [ai_msg]
 
     solution_result.guide = (
         chunk_summary or solution_result.guide or "해설을 생성했습니다."
