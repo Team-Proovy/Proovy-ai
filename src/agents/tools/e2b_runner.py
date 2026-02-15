@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -11,7 +12,7 @@ from e2b_code_interpreter.models import Execution
 from core.settings import settings
 
 _SANDBOX: Sandbox | None = None
-_SANDBOX_LOCK = None
+_SANDBOX_LOCK = threading.Lock()
 _SANDBOX_LAST_USED_AT: float | None = None
 
 _SANDBOX_MAX_IDLE_SECONDS = float(os.getenv("E2B_SANDBOX_MAX_IDLE_SECONDS", "240"))
@@ -29,21 +30,6 @@ def _is_sandbox_stale() -> bool:
     return (time.monotonic() - _SANDBOX_LAST_USED_AT) >= _SANDBOX_MAX_IDLE_SECONDS
 
 
-def _is_recoverable_sandbox_error(error_message: str) -> bool:
-    lowered = error_message.lower()
-    recoverable_tokens = (
-        "unexpectedendofexecution",
-        "sandbox",
-        "closed",
-        "terminated",
-        "timeout",
-        "connection",
-        "network",
-        "eof",
-    )
-    return any(token in lowered for token in recoverable_tokens)
-
-
 def _healthcheck_sandbox(sandbox: Sandbox) -> bool:
     try:
         sandbox.run_code(
@@ -58,27 +44,16 @@ def _healthcheck_sandbox(sandbox: Sandbox) -> bool:
 
 
 def _reset_reused_sandbox() -> None:
-    global _SANDBOX, _SANDBOX_LAST_USED_AT, _SANDBOX_LOCK
-    if _SANDBOX_LOCK is None:
-        import threading
-
-        _SANDBOX_LOCK = threading.Lock()
-
+    global _SANDBOX, _SANDBOX_LAST_USED_AT
     with _SANDBOX_LOCK:
         _SANDBOX = None
         _SANDBOX_LAST_USED_AT = None
 
 
 def _get_sandbox(api_key: str, *, reuse: bool) -> Sandbox:
-    global _SANDBOX, _SANDBOX_LOCK, _SANDBOX_LAST_USED_AT
+    global _SANDBOX, _SANDBOX_LAST_USED_AT
     if not reuse:
-        sandbox = Sandbox.create(api_key=api_key)
-        _mark_sandbox_used()
-        return sandbox
-    if _SANDBOX_LOCK is None:
-        import threading
-
-        _SANDBOX_LOCK = threading.Lock()
+        return Sandbox.create(api_key=api_key)
     with _SANDBOX_LOCK:
         if _SANDBOX is not None and _is_sandbox_stale() and not _healthcheck_sandbox(_SANDBOX):
             _SANDBOX = None
@@ -86,7 +61,6 @@ def _get_sandbox(api_key: str, *, reuse: bool) -> Sandbox:
 
         if _SANDBOX is None:
             _SANDBOX = Sandbox.create(api_key=api_key)
-        _mark_sandbox_used()
         return _SANDBOX
 
 
@@ -145,7 +119,8 @@ def run_python_with_e2b(
             timeout=timeout,
             request_timeout=request_timeout,
         )
-        _mark_sandbox_used()
+        if reuse_sandbox:
+            _mark_sandbox_used()
         return execution
 
     try:
@@ -167,8 +142,6 @@ def run_python_with_e2b(
 
     if execution.error:
         error_message = f"{execution.error.name}: {execution.error.value}"
-        if reuse_sandbox and _is_recoverable_sandbox_error(error_message):
-            _reset_reused_sandbox()
         raise E2BExecutionError(error_message, execution=execution)
 
     return E2BExecutionResult(
