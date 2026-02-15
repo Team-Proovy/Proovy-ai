@@ -80,9 +80,11 @@ def explain(state: AgentState) -> AgentState:
         explain_result.explanation = explanation or explain_result.explanation
 
         # AIMessage를 messages에 추가하여 즉시 스트리밍 및 상태 저장
-        from langchain_core.messages import AIMessage
-        ai_msg = AIMessage(content=explanation)
-        state["messages"] = (state.get("messages") or []) + [ai_msg]
+        if explanation:
+            from langchain_core.messages import AIMessage
+
+            ai_msg = AIMessage(content=explanation)
+            state["messages"] = (state.get("messages") or []) + [ai_msg]
     else:
         explain_result.explanation = (
             explain_result.explanation or "설명할 대상을 찾을 수 없습니다."
