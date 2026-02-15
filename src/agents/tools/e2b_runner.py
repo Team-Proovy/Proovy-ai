@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -11,19 +12,81 @@ from core.settings import settings
 
 _SANDBOX: Sandbox | None = None
 _SANDBOX_LOCK = None
+_SANDBOX_LAST_USED_AT: float | None = None
+
+_SANDBOX_MAX_IDLE_SECONDS = float(os.getenv("E2B_SANDBOX_MAX_IDLE_SECONDS", "240"))
+_SANDBOX_HEALTHCHECK_TIMEOUT = float(os.getenv("E2B_SANDBOX_HEALTHCHECK_TIMEOUT", "5"))
+
+
+def _mark_sandbox_used() -> None:
+    global _SANDBOX_LAST_USED_AT
+    _SANDBOX_LAST_USED_AT = time.monotonic()
+
+
+def _is_sandbox_stale() -> bool:
+    if _SANDBOX_LAST_USED_AT is None:
+        return True
+    return (time.monotonic() - _SANDBOX_LAST_USED_AT) >= _SANDBOX_MAX_IDLE_SECONDS
+
+
+def _is_recoverable_sandbox_error(error_message: str) -> bool:
+    lowered = error_message.lower()
+    recoverable_tokens = (
+        "unexpectedendofexecution",
+        "sandbox",
+        "closed",
+        "terminated",
+        "timeout",
+        "connection",
+        "network",
+        "eof",
+    )
+    return any(token in lowered for token in recoverable_tokens)
+
+
+def _healthcheck_sandbox(sandbox: Sandbox) -> bool:
+    try:
+        sandbox.run_code(
+            "print('ok')",
+            language="python",
+            timeout=_SANDBOX_HEALTHCHECK_TIMEOUT,
+            request_timeout=_SANDBOX_HEALTHCHECK_TIMEOUT + 2,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _reset_reused_sandbox() -> None:
+    global _SANDBOX, _SANDBOX_LAST_USED_AT, _SANDBOX_LOCK
+    if _SANDBOX_LOCK is None:
+        import threading
+
+        _SANDBOX_LOCK = threading.Lock()
+
+    with _SANDBOX_LOCK:
+        _SANDBOX = None
+        _SANDBOX_LAST_USED_AT = None
 
 
 def _get_sandbox(api_key: str, *, reuse: bool) -> Sandbox:
-    global _SANDBOX, _SANDBOX_LOCK
+    global _SANDBOX, _SANDBOX_LOCK, _SANDBOX_LAST_USED_AT
     if not reuse:
-        return Sandbox.create(api_key=api_key)
+        sandbox = Sandbox.create(api_key=api_key)
+        _mark_sandbox_used()
+        return sandbox
     if _SANDBOX_LOCK is None:
         import threading
 
         _SANDBOX_LOCK = threading.Lock()
     with _SANDBOX_LOCK:
+        if _SANDBOX is not None and _is_sandbox_stale() and not _healthcheck_sandbox(_SANDBOX):
+            _SANDBOX = None
+            _SANDBOX_LAST_USED_AT = None
+
         if _SANDBOX is None:
             _SANDBOX = Sandbox.create(api_key=api_key)
+        _mark_sandbox_used()
         return _SANDBOX
 
 
@@ -74,8 +137,7 @@ def run_python_with_e2b(
 
     api_key = _resolve_api_key()
 
-    try:
-        sandbox = _get_sandbox(api_key, reuse=reuse_sandbox)
+    def _execute(sandbox: Sandbox) -> Execution:
         execution = sandbox.run_code(
             code,
             language="python",
@@ -83,11 +145,30 @@ def run_python_with_e2b(
             timeout=timeout,
             request_timeout=request_timeout,
         )
+        _mark_sandbox_used()
+        return execution
+
+    try:
+        sandbox = _get_sandbox(api_key, reuse=reuse_sandbox)
+        execution = _execute(sandbox)
     except Exception as exc:
-        raise E2BExecutionError("Failed to execute code inside E2B sandbox.") from exc
+        if not reuse_sandbox:
+            raise E2BExecutionError("Failed to execute code inside E2B sandbox.") from exc
+
+        # 재사용 샌드박스가 만료/종료되었을 수 있으므로 한 번만 새로 만들어 재시도한다.
+        _reset_reused_sandbox()
+        try:
+            sandbox = _get_sandbox(api_key, reuse=True)
+            execution = _execute(sandbox)
+        except Exception as retry_exc:
+            raise E2BExecutionError(
+                "Failed to execute code inside E2B sandbox."
+            ) from retry_exc
 
     if execution.error:
         error_message = f"{execution.error.name}: {execution.error.value}"
+        if reuse_sandbox and _is_recoverable_sandbox_error(error_message):
+            _reset_reused_sandbox()
         raise E2BExecutionError(error_message, execution=execution)
 
     return E2BExecutionResult(
