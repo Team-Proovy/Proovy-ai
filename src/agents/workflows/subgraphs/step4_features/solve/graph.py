@@ -9,6 +9,7 @@ import sys
 import tempfile
 from typing import List
 
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, StateGraph
 
 from agents.state import (
