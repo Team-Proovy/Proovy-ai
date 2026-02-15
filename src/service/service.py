@@ -414,10 +414,12 @@ async def message_generator(
                         else:
                             update_messages = []
 
-                    # FinalResponse 노드의 메시지는 토큰 스트리밍(stream_mode="messages")으로
-                    # 이미 전송되므로, updates 이벤트에서 중복 전송하지 않음
-                    # if node_name == "FinalResponse" and update_messages:
-                    #     new_messages.extend(update_messages)
+                    # FinalResponse 노드의 메시지 전송:
+                    # - stream_tokens=True일 때: 토큰 스트리밍(messages)으로 이미 전송되므로 건너뜀
+                    # - stream_tokens=False일 때: updates에서 최종 응답을 전송해야 함
+                    if node_name == "FinalResponse" and update_messages:
+                        if not user_input.stream_tokens:
+                            new_messages.extend(update_messages)
 
             if stream_mode == "custom":
                 new_messages = [event]
