@@ -9,6 +9,7 @@ import sys
 import tempfile
 from typing import List
 
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, StateGraph
 
 from agents.state import (
@@ -443,8 +444,10 @@ def solve_writer(state: AgentState) -> AgentState:
     )
     state["partial_responses"] = partial_responses
 
-    # AIMessage는 call_model이 자동으로 생성해주므로 직접 추가 불필요
-    # (call_model 내부에서 LLM 호출 시 LangGraph가 AIMessage 자동 추가)
+    # AIMessage를 messages에 추가하여 즉시 스트리밍 및 상태 저장
+    if formatted_content:
+        ai_msg = AIMessage(content=formatted_content)
+        state["messages"] = (state.get("messages") or []) + [ai_msg]
 
     state["prev_action"] = "Solve_Writer"
 

@@ -70,13 +70,21 @@ def explain(state: AgentState) -> AgentState:
             f"사용자 질문 또는 개념:\n{user_text}\n\n"
             "간단하고 이해하기 쉽게 설명해 주세요."
         )
-        # 난이도 기반 모델 사용
+        # 난이도 기반 모델 사용 (토큰 스트리밍 허용)
         explanation = call_model_by_difficulty(
             state,
             system_prompt,
             user_prompt,
+            tags=[],  # 스트리밍 허용
         ).strip()
         explain_result.explanation = explanation or explain_result.explanation
+
+        # AIMessage를 messages에 추가하여 즉시 스트리밍 및 상태 저장
+        if explanation:
+            from langchain_core.messages import AIMessage
+
+            ai_msg = AIMessage(content=explanation)
+            state["messages"] = (state.get("messages") or []) + [ai_msg]
     else:
         explain_result.explanation = (
             explain_result.explanation or "설명할 대상을 찾을 수 없습니다."
