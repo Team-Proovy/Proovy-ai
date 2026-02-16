@@ -7,7 +7,12 @@ from core.llm import get_model
 from core.settings import settings
 from schema.models import OpenRouterModelName
 
-from agents.prompts.review_prompts import REVIEW_SYSTEM_PROMPT, SUGGESTION_SYSTEM_PROMPT
+from agents.prompts.review_prompts import (
+    REVIEW_SYSTEM_PROMPT,
+    SUGGESTION_SYSTEM_PROMPT,
+    build_review_user_prompt,
+    build_suggestion_user_prompt,
+)
 
 MODEL_NAME = OpenRouterModelName.GPT_5_MINI
 
@@ -227,11 +232,14 @@ def run_review(state: Dict[str, Any]) -> Dict[str, Any]:
         prompt = [
             SystemMessage(content=REVIEW_SYSTEM_PROMPT),
             HumanMessage(
-                content=(
-                    f"Detected deterministic issues: {reasons}\n"
-                    f"Last user message: {last_user_msg}\n"
-                    f"Feature summary: {json.dumps(feature_summary, ensure_ascii=False, default=str)}\n"
-                    f"Please return JSON with keys feedback (short) and suggestions (list)."
+                content=build_review_user_prompt(
+                    reasons=str(reasons),
+                    last_user_msg=str(last_user_msg),
+                    feature_summary=json.dumps(
+                        feature_summary,
+                        ensure_ascii=False,
+                        default=str,
+                    ),
                 )
             ),
         ]
@@ -275,12 +283,15 @@ def run_suggestion(state: Dict[str, Any]) -> Dict[str, Any]:
     prompt = [
         SystemMessage(content=SUGGESTION_SYSTEM_PROMPT),
         HumanMessage(
-            content=(
-                f"Review: {json.dumps(review_state, ensure_ascii=False)}\n"
-                f"Last user message: {last_user_msg}\n"
-                f"Solve progress context: {json.dumps(solve_progress, ensure_ascii=False)}\n"
-                f"Feature summary: {json.dumps(feature_summary, ensure_ascii=False, default=str)}\n"
-                f"Return JSON with keys: ai_message, summary, suggestion_bullets."
+            content=build_suggestion_user_prompt(
+                review_state=json.dumps(review_state, ensure_ascii=False),
+                last_user_msg=str(last_user_msg),
+                solve_progress=json.dumps(solve_progress, ensure_ascii=False),
+                feature_summary=json.dumps(
+                    feature_summary,
+                    ensure_ascii=False,
+                    default=str,
+                ),
             )
         ),
     ]

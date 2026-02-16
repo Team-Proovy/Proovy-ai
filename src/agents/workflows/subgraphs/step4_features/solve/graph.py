@@ -12,6 +12,15 @@ from typing import List
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, StateGraph
 
+from agents.prompts.solve_prompts import (
+    ANALYSIS_SYSTEM_PROMPT,
+    FINAL_SUMMARY_SYSTEM_PROMPT,
+    STRATEGY_SYSTEM_PROMPT,
+    WRITER_SYSTEM_PROMPT,
+    build_analysis_user_prompt,
+    build_strategy_user_prompt,
+    build_writer_user_prompt,
+)
 from agents.state import (
     AgentState,
     ComputationSummary,
@@ -138,38 +147,26 @@ def analyze_problem(state: AgentState) -> AgentState:
     # 대화 맥락이 있으면 포함
     context_section = ""
     if conversation_context:
-        context_section = f"\n\nPrevious conversation context (for reference if user mentions previous problems):\n{conversation_context}\n"
+        context_section = (
+            "Previous conversation context (for reference if user mentions previous "
+            f"problems):\n{conversation_context}"
+        )
 
-    analysis_prompt = f"""
-User input (may be Korean or English):
-{user_text or "N/A"}
-
-OCR extracted text (if any):
-{ocr_text or "N/A"}
-
-{context_section}
-
-Indexed target problem number:
-{indexed_problem_number if indexed_problem_number is not None else "N/A"}
-
-Indexed target problem text:
-{indexed_problem_text or "N/A"}
-
-Task: If indexed target problem text is provided, analyze that problem first. Otherwise analyze the first explicit STEM problem you can find.
-If user refers to a previous problem (e.g., '이전 문제', '방금 푼 문제'), use the conversation context and OCR text to identify it.
-Respond in English.
-""".strip()
-
-    system_prompt = (
-        "You are a STEM problem analyst. Extract only the first explicit problem. "
-        "If the user refers to a previous problem, find it from the conversation context. "
-        "Return structured JSON with keys: problem, domain, knowns, unknowns, laws, constraints, hints. "
-        "Always produce arrays for multi-valued fields and keep all text in concise English."
+    analysis_prompt = build_analysis_user_prompt(
+        user_text=user_text or "N/A",
+        ocr_text=ocr_text or "N/A",
+        context_section=context_section,
+        indexed_problem_number=(
+            str(indexed_problem_number)
+            if indexed_problem_number is not None
+            else "N/A"
+        ),
+        indexed_problem_text=indexed_problem_text or "N/A",
     )
 
     raw_response = call_model(
         OpenRouterModelName.GPT_5_MINI,
-        system_prompt,
+        ANALYSIS_SYSTEM_PROMPT,
         analysis_prompt,
     )
     payload = safe_json_loads(raw_response)
@@ -208,23 +205,11 @@ def plan_solution_strategy(state: AgentState) -> AgentState:
         ensure_ascii=False,
         indent=2,
     )
-    strategy_prompt = f"""
-Here is the problem analysis (in English):
-{analysis_payload}
-
-Task: Plan a step-by-step solution strategy in English and generate Python code that follows the plan.
-The code must NOT use external network access or file I/O; focus only on numeric computation and symbolic manipulation.
-""".strip()
-
-    system_prompt = (
-        "You are a meticulous STEM strategist. Produce JSON with keys summary, steps, generated_code. "
-        "Write summary and steps in clear English. 'steps' must be an ordered list guiding the solution, "
-        "and 'generated_code' must be runnable Python that follows those steps."
-    )
+    strategy_prompt = build_strategy_user_prompt(analysis_payload)
 
     raw_response = call_model(
         OpenRouterModelName.GPT_5_1_CODEX_MINI,
-        system_prompt,
+        STRATEGY_SYSTEM_PROMPT,
         strategy_prompt,
     )
     payload = safe_json_loads(raw_response)
@@ -329,18 +314,12 @@ def execute_strategy(state: AgentState) -> AgentState:
         ensure_ascii=False,
         indent=2,
     )
-    system_prompt = (
-        "You are a STEM tutor who must provide the final solution in Korean. "
-        "Return JSON with keys answer (concise result), steps (2-5 bullet reminders), "
-        "latex (optional final expression), and summary (one short explanation)."
-    )
-
     # 난이도 기반 모델로 결과 요약 (복잡한 문제는 더 강력한 모델 사용)
     difficulty = get_difficulty_from_state(state)
     print(f"→ Summarizing with difficulty: {difficulty}")
     summary_raw = call_model_by_difficulty(
         state,
-        system_prompt,
+        FINAL_SUMMARY_SYSTEM_PROMPT,
         final_prompt,
     )
     summary_payload = safe_json_loads(summary_raw)
@@ -407,24 +386,12 @@ def solve_writer(state: AgentState) -> AgentState:
     serialized_data = json.dumps(solve_data, ensure_ascii=False, indent=2)
 
     # 경량 LLM으로 포맷팅 (토큰 스트리밍 가능)
-    system_prompt = (
-        "너는 수학 문제 풀이 결과를 한국어로 정리하는 전문가야. "
-        "아래 JSON 데이터를 보고 사용자가 읽기 좋게 Markdown 형식으로 변환해 줘. "
-        "다음 규칙을 따라:\n"
-        "1. retry_count > 0이면 '다시 계산해본 결과입니다' 문구 추가\n"
-        "2. answer는 '**답:** {answer}' 형식\n"
-        "3. steps가 있으면 '**풀이 과정:**' + 번호 리스트\n"
-        "4. latex가 있으르면 '**수식:** ${latex}$' 형식\n"
-        "5. computation_success가 false면 '⚠️ 계산 중 오류...' + 에러 3줄\n"
-        "불필요한 설명 없이 간결하게 작성하고, 주어진 데이터만 사용해."
-    )
-
-    user_prompt = f"다음 데이터를 포맷팅해 주세요:\n\n{serialized_data}"
+    user_prompt = build_writer_user_prompt(serialized_data)
 
     # LLM 호출 (토큰 스트리밍 가능, tags=[] 명시)
     formatted_content = call_model(
         OpenRouterModelName.GPT_5_MINI,
-        system_prompt,
+        WRITER_SYSTEM_PROMPT,
         user_prompt,
         tags=[],  # 스트리밍 허용
     ).strip()

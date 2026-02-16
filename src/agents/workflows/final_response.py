@@ -13,6 +13,12 @@ import json
 
 from langchain_core.messages import AIMessage
 
+from agents.prompts.final_response_prompts import (
+    PARTIAL_RESPONSE_SYSTEM_PROMPT,
+    PARTIAL_RESPONSE_USER_INSTRUCTION,
+    TRADITIONAL_RESPONSE_SYSTEM_PROMPT,
+    TRADITIONAL_RESPONSE_USER_INSTRUCTION,
+)
 from agents.state import AgentState
 from agents.workflows.utils import call_model, get_conversation_summary
 from schema.models import OpenRouterModelName
@@ -123,19 +129,9 @@ def final_response(state: AgentState) -> AgentState:
         elif suggestion_summary:
             prompt_parts.append(f"[다음 학습 제안 요약]\n{suggestion_summary}")
 
-        prompt_parts.append(
-            "위 Writer 응답은 이미 사용자에게 스트리밍되었어. "
-            "지금은 **짧은 요약**(2~3문장)만 작성해 줘. "
-            "핵심 결론/정답만 간결하게 정리하고, "
-            "마지막에 '다음 학습 제안' 항목을 붙여 줘. "
-            "절대 위 응답을 다시 반복하지 마."
-        )
+        prompt_parts.append(PARTIAL_RESPONSE_USER_INSTRUCTION)
 
-        system_prompt = (
-            "너는 수학·과학·프로그래밍 문제를 도와주는 한국어 튜터야. "
-            "이미 상세 설명은 사용자에게 전달되었으므로, "
-            "핵심 결론만 2~3문장으로 짧게 요약해 줘. 장황하게 쓰지 마."
-        )
+        system_prompt = PARTIAL_RESPONSE_SYSTEM_PROMPT
         user_prompt = "\n\n".join(prompt_parts)
         answer_text = call_model(
             MODEL_NAME, system_prompt, user_prompt, tags=[]
@@ -168,15 +164,7 @@ def final_response(state: AgentState) -> AgentState:
         # 이전 대화 맥락 수집 (멀티턴 대화 지원)
         conversation_context = get_conversation_summary(state, max_chars=1500)
 
-        system_prompt = (
-            "너는 수학·과학·프로그래밍 문제를 도와주는 한국어 튜터야. "
-            "아래에 주어지는 사용자의 질문과 중간 계산/설명/리뷰 결과를 참고해서 "
-            "사용자가 이해하기 쉬운 최종 답변을 한국어로 작성해 줘. "
-            "너무 장황하지 않게 핵심 위주로 설명하고, 필요한 경우 2~4단계 정도의 "
-            "간단한 풀이 과정을 포함해 줘. "
-            "사용자가 이전 대화를 참조하는 경우(예: '이전 문제', '방금 푼 문제'), "
-            "대화 기록을 참고하여 적절히 답변해 줘."
-        )
+        system_prompt = TRADITIONAL_RESPONSE_SYSTEM_PROMPT
 
         # 모델에 건네줄 사용자 메시지
         parts: list[str] = []
@@ -189,10 +177,7 @@ def final_response(state: AgentState) -> AgentState:
         if formatted_review:
             parts.append(f"[검토 결과]\n{formatted_review}")
 
-        parts.append(
-            "위 정보를 종합해서, 사용자에게 보여줄 최종 한국어 답변을 작성해 줘. "
-            "답변은 친절하지만 불필요하게 길지 않게 하고, 수식이 있다면 LaTeX 형태로 간단히 표기해도 좋아."
-        )
+        parts.append(TRADITIONAL_RESPONSE_USER_INSTRUCTION)
 
         user_prompt = "\n\n".join(parts)
 

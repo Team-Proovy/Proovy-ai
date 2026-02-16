@@ -1,0 +1,4 @@
+Detected deterministic issues: {{reasons}}
+Last user message: {{last_user_msg}}
+Feature summary: {{feature_summary}}
+Please return JSON with keys feedback (short) and suggestions (list).

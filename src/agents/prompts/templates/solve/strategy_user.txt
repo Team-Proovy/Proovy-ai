@@ -1,0 +1,5 @@
+Here is the problem analysis (in English):
+{{analysis_payload}}
+
+Task: Plan a step-by-step solution strategy in English and generate Python code that follows the plan.
+The code must NOT use external network access or file I/O; focus only on numeric computation and symbolic manipulation.

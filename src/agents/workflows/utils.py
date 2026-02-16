@@ -16,8 +16,8 @@ from core.llm import get_model
 from schema.models import OpenRouterModelName
 from agents.prompts.difficulty_prompts import (
     DIFFICULTY_CLASSIFIER_SYSTEM_PROMPT,
-    DIFFICULTY_CLASSIFIER_USER_PROMPT,
     DIFFICULTY_MODEL_MAP,
+    build_difficulty_classifier_user_prompt,
     get_model_for_difficulty,
 )
 
@@ -305,9 +305,7 @@ def classify_difficulty(question: str) -> str:
     classifier = get_model(OpenRouterModelName.GEMINI_25_FLASH)
     classifier = classifier.with_config(tags=["skip_stream"])
 
-    user_prompt = DIFFICULTY_CLASSIFIER_USER_PROMPT.format(
-        problem_text=question[:2000]
-    )
+    user_prompt = build_difficulty_classifier_user_prompt(question[:2000])
 
     prompt = [
         SystemMessage(content=DIFFICULTY_CLASSIFIER_SYSTEM_PROMPT),
