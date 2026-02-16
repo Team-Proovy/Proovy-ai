@@ -10,6 +10,7 @@ from typing import List, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from agents.prompts.splitter_prompts import SPLIT_SYSTEM_PROMPT, build_split_user_prompt
 from core.llm import get_model
 from schema.models import OpenRouterModelName
 
@@ -22,37 +23,6 @@ class ProblemSplit(BaseModel):
     problem_numbers: List[str] = Field(
         default_factory=list, description="문제 번호 목록 (예: ['1번', '2번'])"
     )
-
-
-SPLIT_PROMPT = """당신은 수학/과학 문제를 분리하는 전문가입니다.
-
-주어진 텍스트에서 개별 문제들을 식별하고 분리해주세요.
-
-## 문제 구분 기준
-1. 명시적 번호: "1.", "2.", "3." 또는 "1)", "2)", "3)"
-2. 한글 번호: "문제 1", "문제 2", "1번", "2번"
-3. 소문항: "(가)", "(나)", "(다)" 또는 "(1)", "(2)", "(3)"
-4. 영문: "Problem 1", "Q1", "Question 1"
-
-## 중요 규칙
-- 하나의 문제 안에 여러 소문항이 있으면, 그것은 하나의 문제로 취급
-- 관련 없는 독립적인 문제들만 분리
-- 문제 텍스트는 완전하게 포함 (조건, 보기, 그림 설명 등 모두 포함)
-
-## 출력 형식 (JSON)
-{
-  "is_multiple": true,
-  "problems": ["문제1 전체 텍스트", "문제2 전체 텍스트"],
-  "problem_numbers": ["1번", "2번"]
-}
-
-단일 문제인 경우:
-{
-  "is_multiple": false,
-  "problems": ["전체 문제 텍스트"],
-  "problem_numbers": [""]
-}
-"""
 
 
 def _quick_check_multiple_problems(text: str) -> bool:
@@ -150,10 +120,8 @@ def split_problems(text: str, use_llm: bool = True) -> ProblemSplit:
         model = get_model(OpenRouterModelName.GPT_5_MINI)
 
         messages = [
-            SystemMessage(content=SPLIT_PROMPT),
-            HumanMessage(
-                content=f"다음 텍스트에서 문제들을 분리해주세요:\n\n{text[:3000]}"  # 토큰 제한
-            ),
+            SystemMessage(content=SPLIT_SYSTEM_PROMPT),
+            HumanMessage(content=build_split_user_prompt(text[:3000])),
         ]
 
         response = model.invoke(messages)
