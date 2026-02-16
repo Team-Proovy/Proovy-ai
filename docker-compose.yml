@@ -7,8 +7,8 @@ services:
     container_name: proovy-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${DB_USERNAME}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME:?DB_USERNAME not set}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD not set}
       POSTGRES_DB: ${DB_NAME:-proovy}
     ports:
       - "${DB_PORT:-5432}:5432"
@@ -16,7 +16,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_NAME:-proovy}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -29,7 +29,7 @@ services:
     container_name: proovy-ai
     restart: unless-stopped
     environment:
-      - PGVECTOR_DSN=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:${DB_PORT:-5432}/${DB_NAME:-proovy}
+      - PGVECTOR_DSN=postgresql://${DB_USERNAME:?DB_USERNAME not set}:${DB_PASSWORD:?DB_PASSWORD not set}@postgres:5432/${DB_NAME:-proovy}
       - RAG_VECTORSTORE=pgvector
       - HOST=0.0.0.0
       - PORT=8081

@@ -67,12 +67,20 @@ class PgVectorStore(BaseVectorStore):
         """커넥션 풀에서 커넥션을 가져옴."""
         pool = self._get_pool()
         with pool.connection() as conn:
-            # pgvector extension 등록
+            # pgvector extension 등록 (필수)
             try:
                 from pgvector.psycopg import register_vector
                 register_vector(conn)
-            except ImportError:
-                logger.warning("pgvector package not installed, using raw arrays")
+            except ImportError as e:
+                raise RuntimeError(
+                    "pgvector package is required for embedding column operations. "
+                    "Install with: pip install pgvector"
+                ) from e
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to register pgvector extension with connection. "
+                    f"Ensure pgvector extension is enabled in PostgreSQL: {e}"
+                ) from e
             yield conn
 
     def add_documents(
