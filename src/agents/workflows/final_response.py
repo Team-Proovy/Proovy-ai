@@ -109,11 +109,8 @@ def final_response(state: AgentState) -> AgentState:
         suggestion_bullets = final_output.get("suggestion_bullets")
 
         user_text = _last_user_message(state) or ""
-        conversation_context = get_conversation_summary(state, max_chars=1500)
 
         prompt_parts: list[str] = []
-        if conversation_context:
-            prompt_parts.append(f"[이전 대화 기록]\n{conversation_context}")
         if user_text:
             prompt_parts.append(f"[사용자 질문]\n{user_text}")
         if feature_sections:
@@ -127,15 +124,17 @@ def final_response(state: AgentState) -> AgentState:
             prompt_parts.append(f"[다음 학습 제안 요약]\n{suggestion_summary}")
 
         prompt_parts.append(
-            "위 정보를 바탕으로 사용자에게 보여줄 최종 한국어 답변을 작성해 줘. "
-            "핵심 풀이를 간결하게 정리하고, 마지막에는 '다음 학습 제안' 섹션을 반드시 포함해 줘. "
-            "수식은 필요할 때만 간단한 LaTeX로 표기해도 좋아."
+            "위 Writer 응답은 이미 사용자에게 스트리밍되었어. "
+            "지금은 **짧은 요약**(2~3문장)만 작성해 줘. "
+            "핵심 결론/정답만 간결하게 정리하고, "
+            "마지막에 '다음 학습 제안' 항목을 붙여 줘. "
+            "절대 위 응답을 다시 반복하지 마."
         )
 
         system_prompt = (
             "너는 수학·과학·프로그래밍 문제를 도와주는 한국어 튜터야. "
-            "주어진 부분 응답들을 중복 없이 자연스럽게 통합하고, "
-            "사용자가 다음에 무엇을 공부하면 좋은지 명확히 안내해 줘."
+            "이미 상세 설명은 사용자에게 전달되었으므로, "
+            "핵심 결론만 2~3문장으로 짧게 요약해 줘. 장황하게 쓰지 마."
         )
         user_prompt = "\n\n".join(prompt_parts)
         answer_text = call_model(
