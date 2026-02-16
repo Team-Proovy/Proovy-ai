@@ -277,16 +277,17 @@ class PgVectorStore(BaseVectorStore):
 
         # 코사인 유사도 검색 (1 - cosine_distance = cosine_similarity)
         # pgvector의 <=> 연산자는 코사인 거리를 반환 (0 = 동일, 2 = 반대)
+        # 명시적 ::vector 캐스팅으로 double precision[] → vector 변환 보장
         search_query = sql.SQL("""
             SELECT
                 doc_id,
                 title,
                 content,
-                1 - (embedding <=> %s) AS score,
+                1 - (embedding <=> %s::vector) AS score,
                 metadata
             FROM {table}
             {filter_clause}
-            ORDER BY embedding <=> %s
+            ORDER BY embedding <=> %s::vector
             LIMIT %s
         """).format(
             table=sql.Identifier(self.table_name),
