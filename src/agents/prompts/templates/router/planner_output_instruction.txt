@@ -1,0 +1,1 @@
+Respond with JSON like {"plan": ["Solve", "Explain"]} where each item belongs to [{{allowed}}] and there are no duplicates.

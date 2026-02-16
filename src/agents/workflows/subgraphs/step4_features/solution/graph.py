@@ -13,6 +13,10 @@ from typing import Any, List, Optional, Tuple
 
 from langgraph.graph import END, StateGraph
 
+from agents.prompts.solution_prompts import (
+    SOLUTION_SYSTEM_PROMPT,
+    build_solution_user_prompt,
+)
 from agents.state import AgentState, SolutionProgress, SolutionResult
 from agents.tools import (
     E2BExecutionError,
@@ -38,7 +42,6 @@ from .problem_utils import (
 
 
 CHUNK_SIZE_DEFAULT = 5
-SOLUTION_JSON_EXAMPLE = '{"explanations":["해설1","해설2"],"chunk_summary":"요약"}'
 
 
 def _ensure_progress(state: AgentState) -> SolutionProgress:
@@ -116,30 +119,8 @@ def _record_pdf_failure(
 
 
 def _build_solution_prompts(problems: List[str]) -> Tuple[str, str]:
-    system_prompt = (
-        "You are a Korean tutor. Provide detailed explanations in Korean.\n"
-        "Return ONLY valid JSON. No markdown, no extra text.\n"
-        "Keys: explanations (list), chunk_summary (string).\n"
-        "The length of explanations MUST equal the number of problems and keep order.\n"
-        "Each explanation MUST start with the original problem number.\n"
-        "Each explanation MUST include a first line formatted as '정답: ...' "
-        "with the final answer.\n"
-        "**CRITICAL: Always use LaTeX delimiters ($ ... $) for all mathematical symbols, expressions, and formulas (e.g., $x^2$, $\\sum$, $\\infty$). DO NOT use Unicode math symbols directly.**"
-    )
-    user_prompt = (
-        "다음 문제들에 대한 해설을 작성해 주세요.\n"
-        "출력은 반드시 JSON만 반환하세요.\n\n"
-        "예시 형식:\n"
-        f"{SOLUTION_JSON_EXAMPLE}\n\n"
-        "각 해설은 원본 문제 번호로 시작하고, 첫 줄에 '정답: 정답 내용 및 값'을 포함하세요.\n"
-        "수식 내의 지수나 첨자를 주의 깊게 확인하고 원문의 선택지 내에서만 답을 고르세요.\n"
-        "**중요: 만약 계산 결과가 주어진 선택지 ①~⑤ 중에 없다면, 자신의 계산 과정을 다시 검토하여 반드시 선택지 중 하나를 최종 정답으로 도출하세요. 절대로 선택지에 없는 값을 정답으로 쓰지 마세요.**\n"
-        "정답은 보기/선택지 형식(예: ②, ㄱ·ㄴ·ㄷ, 14/81 등)을 그대로 쓰고, "
-        "가능하면 결과를 한 번 검산해 주세요.\n\n"
-        "문제 목록:\n"
-        + json.dumps({"problems": problems}, ensure_ascii=False, indent=2)
-    )
-    return system_prompt, user_prompt
+    problems_json = json.dumps({"problems": problems}, ensure_ascii=False, indent=2)
+    return SOLUTION_SYSTEM_PROMPT, build_solution_user_prompt(problems_json)
 
 
 def _parse_solution_payload(raw: Any) -> Tuple[List[str], Optional[str]]:

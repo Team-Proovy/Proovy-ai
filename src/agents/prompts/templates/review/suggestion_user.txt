@@ -1,0 +1,5 @@
+Review: {{review_state}}
+Last user message: {{last_user_msg}}
+Solve progress context: {{solve_progress}}
+Feature summary: {{feature_summary}}
+Return JSON with keys: ai_message, summary, suggestion_bullets.

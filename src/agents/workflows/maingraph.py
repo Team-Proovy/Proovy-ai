@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState, CreditState
+from agents.prompts.maingraph_prompts import build_simple_response_system_prompt
 from core.llm import get_model
 from agents.workflows.review_logic import run_review, run_suggestion
 from agents.workflows.final_response import final_response
@@ -221,15 +222,7 @@ def simple_response(state: AgentState) -> AgentState:
         if history_lines:
             history_context = "\n\n[이전 대화 기록]\n" + "\n".join(history_lines)
 
-    system_prompt = (
-        "You are a friendly Korean tutor chatbot. "
-        "The user asked a non-STEM question. "
-        "Answer briefly and conversationally in natural Korean, "
-        "without complex math or formulas. "
-        "If the user refers to previous conversation (e.g., '이전 문제', '방금 푼 문제'), "
-        "use the conversation history to provide a relevant answer."
-        f"{history_context}"
-    )
+    system_prompt = build_simple_response_system_prompt(history_context)
 
     model = get_model(OpenRouterModelName.GPT_5_MINI)
 

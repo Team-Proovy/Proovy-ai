@@ -1,0 +1,5 @@
+{{context_info}}
+Current Question:
+{{combined_question}}
+
+Answer with either STEM or NON_STEM.

@@ -1,0 +1,7 @@
+Problem:
+{{problem_text}}
+
+Based on the criteria above, classify this problem's difficulty.
+Remember: Choose HARD only for truly complex problems. When uncertain, prefer MEDIUM over HARD.
+
+Difficulty:

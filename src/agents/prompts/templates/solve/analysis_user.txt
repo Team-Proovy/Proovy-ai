@@ -1,0 +1,17 @@
+User input (may be Korean or English):
+{{user_text}}
+
+OCR extracted text (if any):
+{{ocr_text}}
+
+{{context_section}}
+
+Indexed target problem number:
+{{indexed_problem_number}}
+
+Indexed target problem text:
+{{indexed_problem_text}}
+
+Task: If indexed target problem text is provided, analyze that problem first. Otherwise analyze the first explicit STEM problem you can find.
+If user refers to a previous problem (e.g., '이전 문제', '방금 푼 문제'), use the conversation context and OCR text to identify it.
+Respond in English.
