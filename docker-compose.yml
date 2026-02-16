@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: proovy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: proovy_user
+      POSTGRES_PASSWORD: 1234
+      POSTGRES_DB: proovy
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proovy_user -d proovy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Proovy AI Service
+  proovy-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: proovy-ai
+    restart: unless-stopped
+    environment:
+      - PGVECTOR_DSN=postgresql://proovy_user:1234@postgres:5432/proovy
+      - RAG_VECTORSTORE=pgvector
+      - EMBEDDING_MODEL=text-embedding-3-small
+      - EMBEDDING_DIMENSION=1536
+      - HOST=0.0.0.0
+      - PORT=8081
+    env_file:
+      - .env
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
