@@ -1,16 +1,42 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
+import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional
+from urllib.parse import quote_plus
 
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from rag.vector_store.base import BaseVectorStore
 
 logger = logging.getLogger(__name__)
+
+
+def _build_dsn_from_env() -> str:
+    """개별 환경변수에서 DSN을 조립 (URL 인코딩 포함)."""
+    # 먼저 PGVECTOR_DSN이 있으면 그대로 사용
+    dsn = os.getenv("PGVECTOR_DSN")
+    if dsn:
+        return dsn
+
+    # 개별 환경변수에서 조립
+    host = os.getenv("PGVECTOR_HOST", "localhost")
+    port = os.getenv("PGVECTOR_PORT", "5432")
+    db = os.getenv("PGVECTOR_DB", os.getenv("DB_NAME", "proovy"))
+    user = os.getenv("PGVECTOR_USER", os.getenv("DB_USERNAME", ""))
+    password = os.getenv("PGVECTOR_PASSWORD", os.getenv("DB_PASSWORD", ""))
+
+    if not user or not password:
+        return ""
+
+    # URL 특수문자 인코딩
+    encoded_user = quote_plus(user)
+    encoded_password = quote_plus(password)
+
+    return f"postgresql://{encoded_user}:{encoded_password}@{host}:{port}/{db}"
 
 
 class PgVectorStore(BaseVectorStore):
@@ -28,23 +54,32 @@ class PgVectorStore(BaseVectorStore):
         """PgVectorStore 초기화.
 
         Args:
-            dsn: PostgreSQL 연결 문자열 (기본값: PGVECTOR_DSN 환경변수)
+            dsn: PostgreSQL 연결 문자열 (기본값: 환경변수에서 조립)
             table_name: 임베딩이 저장된 테이블명
             pool_size: 커넥션 풀 크기
         """
-        self.dsn = dsn or os.getenv("PGVECTOR_DSN", "")
+        self.dsn = dsn or _build_dsn_from_env()
         self.table_name = table_name
         self.pool_size = pool_size
         self._pool = None
+        self._pool_lock = threading.Lock()
 
         if not self.dsn:
             raise ValueError(
-                "PGVECTOR_DSN environment variable or dsn parameter is required"
+                "Database connection not configured. "
+                "Set PGVECTOR_DSN or PGVECTOR_USER/PGVECTOR_PASSWORD environment variables."
             )
 
     def _get_pool(self):
-        """커넥션 풀을 lazy하게 초기화."""
-        if self._pool is None:
+        """커넥션 풀을 thread-safe하게 lazy 초기화."""
+        if self._pool is not None:
+            return self._pool
+
+        with self._pool_lock:
+            # Double-check locking
+            if self._pool is not None:
+                return self._pool
+
             try:
                 from psycopg_pool import ConnectionPool
             except ImportError:
@@ -169,7 +204,7 @@ class PgVectorStore(BaseVectorStore):
                                 doc["title"],
                                 doc["content"],
                                 embedding,
-                                json.dumps(doc["metadata"]),
+                                Jsonb(doc["metadata"]),
                             ),
                         )
 
@@ -334,10 +369,11 @@ class PgVectorStore(BaseVectorStore):
 
     def close(self) -> None:
         """커넥션 풀 종료."""
-        if self._pool is not None:
-            self._pool.close()
-            self._pool = None
-            logger.info("PgVectorStore connection pool closed")
+        with self._pool_lock:
+            if self._pool is not None:
+                self._pool.close()
+                self._pool = None
+                logger.info("PgVectorStore connection pool closed")
 
     def __enter__(self):
         return self

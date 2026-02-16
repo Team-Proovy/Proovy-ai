@@ -29,8 +29,12 @@ services:
     container_name: proovy-ai
     restart: unless-stopped
     environment:
-      - PGVECTOR_DSN=postgresql://${DB_USERNAME:?DB_USERNAME not set}:${DB_PASSWORD:?DB_PASSWORD not set}@postgres:5432/${DB_NAME:-proovy}
       - RAG_VECTORSTORE=pgvector
+      - PGVECTOR_HOST=postgres
+      - PGVECTOR_PORT=5432
+      - PGVECTOR_DB=${DB_NAME:-proovy}
+      - PGVECTOR_USER=${DB_USERNAME:?DB_USERNAME not set}
+      - PGVECTOR_PASSWORD=${DB_PASSWORD:?DB_PASSWORD not set}
       - HOST=0.0.0.0
       - PORT=8081
     env_file:
