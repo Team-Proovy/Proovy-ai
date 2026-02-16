@@ -6,28 +6,34 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-# OpenAI 클라이언트 (lazy initialization)
+# OpenAI 클라이언트 (OpenRouter 호환, lazy initialization)
 _openai_client: Optional["OpenAI"] = None
 
 
 def _get_openai_client() -> "OpenAI":
-    """OpenAI 클라이언트를 lazy하게 초기화하여 반환."""
+    """OpenAI 호환 클라이언트를 lazy하게 초기화하여 반환.
+
+    OpenRouter 엔드포인트를 사용하여 임베딩을 생성합니다.
+    """
     global _openai_client
     if _openai_client is None:
         try:
             from openai import OpenAI
-        except ImportError:
+        except ImportError as err:
             raise ImportError(
                 "openai package is required. Install with: pip install openai"
-            )
+            ) from err
 
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             raise ValueError(
-                "OPENAI_API_KEY environment variable is required for embeddings"
+                "OPENROUTER_API_KEY environment variable is required for embeddings"
             )
 
-        _openai_client = OpenAI(api_key=api_key)
+        _openai_client = OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
     return _openai_client
 
 
@@ -37,11 +43,11 @@ def embed_texts(
     model: Optional[str] = None,
     batch_size: Optional[int] = None,
 ) -> List[List[float]]:
-    """OpenAI Embeddings API를 사용하여 텍스트를 벡터로 변환.
+    """OpenRouter Embeddings API를 사용하여 텍스트를 벡터로 변환.
 
     Args:
         texts: 임베딩할 텍스트 리스트
-        model: 임베딩 모델명 (기본값: EMBEDDING_MODEL 환경변수 또는 text-embedding-3-small)
+        model: 임베딩 모델명 (기본값: EMBEDDING_MODEL 환경변수 또는 openai/text-embedding-3-small)
         batch_size: 배치 크기 (기본값: EMBEDDING_BATCH_SIZE 환경변수 또는 100)
 
     Returns:
@@ -56,7 +62,7 @@ def embed_texts(
 
     # 환경변수에서 설정 로드
     if model is None:
-        model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        model = os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small")
     if batch_size is None:
         batch_size = int(os.getenv("EMBEDDING_BATCH_SIZE", "100"))
 
