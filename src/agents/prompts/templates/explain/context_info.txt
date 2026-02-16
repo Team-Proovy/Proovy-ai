@@ -1,2 +1,1 @@
-
 Consider the previous conversation context when explaining. If user refers to previous problems or topics, use that context.

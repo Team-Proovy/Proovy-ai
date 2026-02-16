@@ -1,3 +1,2 @@
-
 [Previous conversation context]:
 {{conversation_context}}

@@ -40,7 +40,7 @@ def build_stem_context_section(conversation_context: str) -> str:
     return render_prompt(
         "router/stem_context_section.txt",
         conversation_context=conversation_context,
-    ).rstrip()
+    ).strip()
 
 
 def build_stem_user_prompt(context_info: str, combined_question: str) -> str:

@@ -1,7 +1,7 @@
 from agents.prompts.loader import load_prompt, render_prompt
 
 
-EXPLAIN_CONTEXT_INFO_PROMPT = load_prompt("explain/context_info.txt").rstrip()
+EXPLAIN_CONTEXT_INFO_PROMPT = load_prompt("explain/context_info.txt").strip()
 
 
 def build_explain_system_prompt(context_info: str) -> str:
@@ -15,7 +15,7 @@ def build_explain_history_section(conversation_context: str) -> str:
     return render_prompt(
         "explain/history_section.txt",
         conversation_context=conversation_context,
-    ).rstrip()
+    ).strip()
 
 
 def build_explain_user_prompt(history_section: str, user_text: str) -> str:
