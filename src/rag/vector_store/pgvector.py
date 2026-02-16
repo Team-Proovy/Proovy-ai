@@ -6,6 +6,8 @@ import os
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional
 
+from psycopg import sql
+
 from rag.vector_store.base import BaseVectorStore
 
 logger = logging.getLogger(__name__)
@@ -132,6 +134,19 @@ class PgVectorStore(BaseVectorStore):
         embeddings = embed_texts(texts_to_embed, batch_size=batch_size)
 
         # DB에 저장
+        insert_query = sql.SQL("""
+            INSERT INTO {table}
+                (doc_id, title, content, embedding, metadata)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (doc_id)
+            DO UPDATE SET
+                title = EXCLUDED.title,
+                content = EXCLUDED.content,
+                embedding = EXCLUDED.embedding,
+                metadata = EXCLUDED.metadata,
+                updated_at = CURRENT_TIMESTAMP
+        """).format(table=sql.Identifier(self.table_name))
+
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 for i in range(0, len(processed_docs), batch_size):
@@ -139,20 +154,8 @@ class PgVectorStore(BaseVectorStore):
                     batch_embeddings = embeddings[i:i + batch_size]
 
                     for doc, embedding in zip(batch_docs, batch_embeddings):
-                        # UPSERT: doc_id가 이미 존재하면 업데이트
                         cur.execute(
-                            f"""
-                            INSERT INTO {self.table_name}
-                                (doc_id, title, content, embedding, metadata)
-                            VALUES (%s, %s, %s, %s, %s)
-                            ON CONFLICT (doc_id)
-                            DO UPDATE SET
-                                title = EXCLUDED.title,
-                                content = EXCLUDED.content,
-                                embedding = EXCLUDED.embedding,
-                                metadata = EXCLUDED.metadata,
-                                updated_at = CURRENT_TIMESTAMP
-                            """,
+                            insert_query,
                             (
                                 doc["doc_id"],
                                 doc["title"],
@@ -207,37 +210,42 @@ class PgVectorStore(BaseVectorStore):
             return []
 
         # 필터 조건 생성
-        filter_clause = ""
+        filter_clause = sql.SQL("")
         filter_params: List[Any] = []
 
         if filters:
             filter_conditions = []
             for key, value in filters.items():
-                filter_conditions.append(f"metadata->>%s = %s")
+                filter_conditions.append("metadata->>%s = %s")
                 filter_params.extend([key, str(value)])
 
             if filter_conditions:
-                filter_clause = "WHERE " + " AND ".join(filter_conditions)
+                filter_clause = sql.SQL("WHERE ") + sql.SQL(" AND ").join(
+                    sql.SQL(cond) for cond in filter_conditions
+                )
 
         # 코사인 유사도 검색 (1 - cosine_distance = cosine_similarity)
         # pgvector의 <=> 연산자는 코사인 거리를 반환 (0 = 동일, 2 = 반대)
+        search_query = sql.SQL("""
+            SELECT
+                doc_id,
+                title,
+                content,
+                1 - (embedding <=> %s) AS score,
+                metadata
+            FROM {table}
+            {filter_clause}
+            ORDER BY embedding <=> %s
+            LIMIT %s
+        """).format(
+            table=sql.Identifier(self.table_name),
+            filter_clause=filter_clause,
+        )
+
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                sql = f"""
-                    SELECT
-                        doc_id,
-                        title,
-                        content,
-                        1 - (embedding <=> %s) AS score,
-                        metadata
-                    FROM {self.table_name}
-                    {filter_clause}
-                    ORDER BY embedding <=> %s
-                    LIMIT %s
-                """
-
                 params = [query_embedding] + filter_params + [query_embedding, top_k]
-                cur.execute(sql, params)
+                cur.execute(search_query, params)
 
                 results = []
                 for row in cur.fetchall():
@@ -268,12 +276,13 @@ class PgVectorStore(BaseVectorStore):
         Returns:
             삭제 성공 여부
         """
+        delete_query = sql.SQL("DELETE FROM {table} WHERE doc_id = %s").format(
+            table=sql.Identifier(self.table_name)
+        )
+
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    f"DELETE FROM {self.table_name} WHERE doc_id = %s",
-                    (doc_id,),
-                )
+                cur.execute(delete_query, (doc_id,))
                 deleted = cur.rowcount > 0
                 conn.commit()
 
@@ -290,9 +299,13 @@ class PgVectorStore(BaseVectorStore):
         Returns:
             삭제된 문서 수
         """
+        delete_query = sql.SQL("DELETE FROM {table}").format(
+            table=sql.Identifier(self.table_name)
+        )
+
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"DELETE FROM {self.table_name}")
+                cur.execute(delete_query)
                 deleted_count = cur.rowcount
                 conn.commit()
 
@@ -301,9 +314,13 @@ class PgVectorStore(BaseVectorStore):
 
     def count(self) -> int:
         """저장된 문서 수 반환."""
+        count_query = sql.SQL("SELECT COUNT(*) FROM {table}").format(
+            table=sql.Identifier(self.table_name)
+        )
+
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT COUNT(*) FROM {self.table_name}")
+                cur.execute(count_query)
                 result = cur.fetchone()
                 return result[0] if result else 0
 

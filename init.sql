@@ -14,20 +14,16 @@ CREATE TABLE IF NOT EXISTS document_embeddings (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 인덱스 생성
--- doc_id 인덱스 (unique constraint가 이미 생성함)
--- CREATE INDEX IF NOT EXISTS idx_doc_id ON document_embeddings(doc_id);
-
 -- metadata JSONB 인덱스 (GIN - 필터링용)
 CREATE INDEX IF NOT EXISTS idx_metadata ON document_embeddings USING GIN (metadata);
 
--- 벡터 유사도 검색용 IVFFlat 인덱스 (코사인 유사도)
--- lists 값은 데이터 양에 따라 조정 (일반적으로 sqrt(rows) 권장)
--- 초기에는 100개 리스트로 설정, 데이터가 10,000개 이상 쌓이면 재생성 고려
-CREATE INDEX IF NOT EXISTS idx_embedding_ivfflat
+-- 벡터 유사도 검색용 HNSW 인덱스 (코사인 유사도)
+-- HNSW는 빈 테이블에서도 생성 가능하며, 데이터 추가 시 자동으로 업데이트됨
+-- m: 각 노드의 최대 연결 수 (기본값 16), ef_construction: 인덱스 구축 시 탐색 범위 (기본값 64)
+CREATE INDEX IF NOT EXISTS idx_embedding_hnsw
 ON document_embeddings
-USING ivfflat (embedding vector_cosine_ops)
-WITH (lists = 100);
+USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 64);
 
 -- updated_at 자동 갱신 트리거
 CREATE OR REPLACE FUNCTION update_updated_at_column()

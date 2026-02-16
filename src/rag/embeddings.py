@@ -71,7 +71,8 @@ def embed_texts(
 
     if not processed_texts:
         logger.warning("All texts were empty after preprocessing")
-        return [[0.0] * int(os.getenv("EMBEDDING_DIMENSION", "1536"))] * len(texts)
+        dim = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
+        return [[0.0] * dim for _ in range(len(texts))]
 
     try:
         client = _get_openai_client()
@@ -99,7 +100,7 @@ def embed_texts(
         embedding_dim = len(all_embeddings[0]) if all_embeddings else int(
             os.getenv("EMBEDDING_DIMENSION", "1536")
         )
-        result = [[0.0] * embedding_dim] * len(texts)
+        result = [[0.0] * embedding_dim for _ in range(len(texts))]
         for idx, embedding in zip(original_indices, all_embeddings):
             result[idx] = embedding
 

@@ -225,9 +225,12 @@ def main():
     if args.file:
         logger.info("Loading documents from file: %s", args.file)
         documents = load_from_json(args.file)
-    elif args.sample or not args.file:
+    elif args.sample:
         logger.info("Loading sample documents")
         documents = SAMPLE_DOCUMENTS
+    else:
+        logger.error("Either --file or --sample flag is required")
+        sys.exit(1)
 
     if not documents:
         logger.warning("No documents to load")

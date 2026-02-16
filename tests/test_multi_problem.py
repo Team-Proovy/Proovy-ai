@@ -251,9 +251,5 @@ class TestIntegration:
         assert "x^2 = 16" in current_problem
 
 
-# ProblemSplit 모델에 total_problems 속성 추가 (테스트용)
-ProblemSplit.model_rebuild()
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
