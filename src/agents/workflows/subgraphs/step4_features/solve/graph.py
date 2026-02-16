@@ -157,9 +157,7 @@ def analyze_problem(state: AgentState) -> AgentState:
         ocr_text=ocr_text or "N/A",
         context_section=context_section,
         indexed_problem_number=(
-            str(indexed_problem_number)
-            if indexed_problem_number is not None
-            else "N/A"
+            str(indexed_problem_number) if indexed_problem_number is not None else "N/A"
         ),
         indexed_problem_text=indexed_problem_text or "N/A",
     )
@@ -289,7 +287,7 @@ def execute_strategy(state: AgentState) -> AgentState:
                 text_output = local_text
             else:
                 stderr.append(f"Execution error: {str(exc)}")
-    
+
     execution_summary = ComputationSummary(
         success=success,
         stdout=stdout,
@@ -416,7 +414,7 @@ def solve_writer(state: AgentState) -> AgentState:
         ai_msg = AIMessage(content=formatted_content)
         state["messages"] = (state.get("messages") or []) + [ai_msg]
 
-    state["prev_action"] = "Solve_Writer"
+    state["prev_action"] = "Solve"
 
     return state
 

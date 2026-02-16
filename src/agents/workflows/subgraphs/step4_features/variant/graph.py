@@ -10,7 +10,6 @@ def variant(state: AgentState) -> AgentState:
     print("---FEATURE: VARIANT---")
     # TODO: Implement actual logic for variant
     state["prev_action"] = "Variant"
-    state["next_action"] = "Executor"
     return state
 
 

@@ -10,7 +10,6 @@ def check(state: AgentState) -> AgentState:
     print("---FEATURE: CHECK---")
     # TODO: Implement actual logic for check
     state["prev_action"] = "Check"
-    state["next_action"] = "Executor"
     return state
 
 

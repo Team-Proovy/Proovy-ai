@@ -10,7 +10,6 @@ def create_graph(state: AgentState) -> AgentState:
     print("---FEATURE: CREATE_GRAPH---")
     # TODO: Implement actual logic for create_graph
     state["prev_action"] = "CreateGraph"
-    state["next_action"] = "Executor"
     return state
 
 
