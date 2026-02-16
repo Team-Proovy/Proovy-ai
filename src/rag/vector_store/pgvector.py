@@ -82,10 +82,10 @@ class PgVectorStore(BaseVectorStore):
 
             try:
                 from psycopg_pool import ConnectionPool
-            except ImportError:
+            except ImportError as err:
                 raise ImportError(
                     "psycopg[pool] is required. Install with: pip install 'psycopg[binary,pool]'"
-                )
+                ) from err
 
             self._pool = ConnectionPool(
                 self.dsn,
@@ -175,6 +175,14 @@ class PgVectorStore(BaseVectorStore):
         # 임베딩 생성
         logger.info("Embedding %d documents...", len(processed_docs))
         embeddings = embed_texts(texts_to_embed, batch_size=batch_size)
+
+        # 길이 검증 (silent drop 방지)
+        if len(embeddings) != len(processed_docs):
+            raise ValueError(
+                f"Embedding count mismatch: got {len(embeddings)} embeddings "
+                f"for {len(processed_docs)} documents. "
+                "This may indicate an embedding API error."
+            )
 
         # DB에 저장
         insert_query = sql.SQL("""
