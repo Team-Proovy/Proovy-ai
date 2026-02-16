@@ -16,6 +16,19 @@ from typing import Literal, List, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
+from agents.prompts.router_prompts import (
+    COMPLEXITY_SYSTEM_PROMPT,
+    PLANNER_SYSTEM_PROMPT,
+    STEM_CLASSIFIER_SYSTEM_PROMPT,
+    build_complexity_user_prompt,
+    build_planner_hints_section,
+    build_planner_output_instruction,
+    build_planner_question_section,
+    build_primary_feature_system_prompt,
+    build_primary_feature_user_prompt,
+    build_stem_context_section,
+    build_stem_user_prompt,
+)
 from agents.state import AgentState
 from agents.workflows.problem_utils import (
     extract_problem_inventory,
@@ -186,15 +199,9 @@ def _is_complex_intent(question: str) -> bool:
         return False
     classifier = get_model(OpenRouterModelName.GPT_5_MINI)
     classifier = classifier.with_config(tags=["skip_stream"])
-    system_prompt = (
-        "You are an intent assessor. "
-        "Return 'MULTI' if the request needs multiple distinct reasoning steps "
-        "(e.g., solve then explain, or create variants after solving). "
-        "Return 'SINGLE' if one feature is enough."
-    )
     prompt = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Question:\n{question}\n\nAnswer SINGLE or MULTI."),
+        SystemMessage(content=COMPLEXITY_SYSTEM_PROMPT),
+        HumanMessage(content=build_complexity_user_prompt(question)),
     ]
     try:
         verdict = classifier.invoke(prompt)
@@ -216,11 +223,8 @@ def _infer_primary_feature(question: str) -> Optional[str]:
     if _has_solve_intent(question):
         return "Solve"
     allowed = ", ".join(sorted(FEATURE_ACTIONS))
-    system_prompt = (
-        "You map a math-related request to the most suitable feature. "
-        f"Choose exactly one from [{allowed}]."
-    )
-    human_prompt = f"Question:\n{question}\n\nReturn only the chosen feature name."
+    system_prompt = build_primary_feature_system_prompt(allowed)
+    human_prompt = build_primary_feature_user_prompt(question)
     model = get_model(OpenRouterModelName.GPT_5_MINI)
     model = model.with_config(tags=["skip_stream"])
     try:
@@ -242,30 +246,19 @@ def _generate_plan_with_model(
         return []
 
     allowed = ", ".join(sorted(FEATURE_ACTIONS))
-    system_prompt = (
-        "You are a meticulous planner for a math tutoring agent. "
-        "Break the task into an ordered list of features chosen from the allowed set. "
-        "Return valid JSON so that downstream code can parse it."
-    )
     sections: List[str] = []
     if question:
-        sections.append(f"Question:\n{question}")
+        sections.append(build_planner_question_section(question))
     if hints:
-        sections.append(
-            "User explicitly selected features (respect this order when reasonable): "
-            + ", ".join(hints)
-        )
-    sections.append(
-        'Respond with JSON like {"plan": ["Solve", "Explain"]} where each item '
-        f"belongs to [{allowed}] and there are no duplicates."
-    )
+        sections.append(build_planner_hints_section(", ".join(hints)))
+    sections.append(build_planner_output_instruction(allowed))
 
     model = get_model(OpenRouterModelName.GPT_5_1_CODEX_MINI)
     model = model.with_config(tags=["skip_stream"])
     try:
         ai_message = model.invoke(
             [
-                SystemMessage(content=system_prompt),
+                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
                 HumanMessage(content="\n\n".join(sections)),
             ]
         )
@@ -348,32 +341,11 @@ def intent(state: AgentState) -> AgentState:
         # 대화 맥락이 있으면 포함하여 더 정확한 분류
         context_info = ""
         if conversation_context:
-            context_info = (
-                f"\n\n[Previous conversation context]:\n{conversation_context}\n"
-            )
-
-        system_prompt = (
-            "You are a strict classifier. "
-            "Return 'STEM' ONLY if the user's input is a clear, explicit question or request "
-            "about math, physics, chemistry, biology, engineering, or computer science. "
-            "IMPORTANT: Return 'NON_STEM' for:\n"
-            "- Random numbers without context (e.g., '569', '123')\n"
-            "- Single words or phrases that are not explicit STEM questions\n"
-            "- Greetings, casual chat, or meaningless input\n"
-            "- Ambiguous input that could be anything\n"
-            "Consider the conversation context - if user refers to previous "
-            "STEM problems (e.g., '이전 문제', '방금 푼 문제'), classify as STEM. "
-            "When in doubt, return 'NON_STEM'."
-        )
+            context_info = build_stem_context_section(conversation_context)
         prompt_messages = [
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=STEM_CLASSIFIER_SYSTEM_PROMPT),
             HumanMessage(
-                content=(
-                    f"{context_info}"
-                    "Current Question:\n"
-                    f"{combined_question}\n\n"
-                    "Answer with either STEM or NON_STEM."
-                )
+                content=build_stem_user_prompt(context_info, combined_question)
             ),
         ]
         try:

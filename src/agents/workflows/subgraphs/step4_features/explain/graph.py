@@ -13,6 +13,12 @@ checkpointer가 저장한 대화 히스토리를 활용하여 멀티턴 대화�
 
 from langgraph.graph import END, StateGraph
 
+from agents.prompts.explain_prompts import (
+    EXPLAIN_CONTEXT_INFO_PROMPT,
+    build_explain_history_section,
+    build_explain_system_prompt,
+    build_explain_user_prompt,
+)
 from agents.state import AgentState, ExplainResult
 from agents.workflows.utils import (
     call_model_by_difficulty,
@@ -48,28 +54,15 @@ def explain(state: AgentState) -> AgentState:
         # 대화 맥락이 있으면 시스템 프롬프트에 포함
         context_info = ""
         if conversation_context:
-            context_info = (
-                "\n\nConsider the previous conversation context when explaining. "
-                "If user refers to previous problems or topics, use that context."
-            )
-
-        system_prompt = (
-            "You are a kind Korean tutor. "
-            "Explain the given concept or question in very simple Korean, "
-            "using short sentences and, if helpful, 1-2 easy examples."
-            f"{context_info}"
-        )
+            context_info = EXPLAIN_CONTEXT_INFO_PROMPT
+        system_prompt = build_explain_system_prompt(context_info)
 
         # 대화 맥락이 있으면 프롬프트에 포함
         history_section = ""
         if conversation_context:
-            history_section = f"\n\n[이전 대화 기록]\n{conversation_context}\n"
+            history_section = build_explain_history_section(conversation_context)
 
-        user_prompt = (
-            f"{history_section}"
-            f"사용자 질문 또는 개념:\n{user_text}\n\n"
-            "간단하고 이해하기 쉽게 설명해 주세요."
-        )
+        user_prompt = build_explain_user_prompt(history_section, user_text)
         # 난이도 기반 모델 사용 (토큰 스트리밍 허용)
         explanation = call_model_by_difficulty(
             state,
