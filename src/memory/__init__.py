@@ -96,6 +96,55 @@ class AsyncCheckpointerWrapper:
         return await asyncio.to_thread(self._inner.put_writes, *args, **kwargs)
 
 
+def _mask_connection_string(uri: str) -> str:
+    """민감한 정보를 가린 연결 문자열 반환 (로깅용)."""
+    try:
+        from urllib.parse import urlparse, urlunparse
+
+        parsed = urlparse(uri)
+        # 비밀번호 마스킹
+        if parsed.password:
+            masked_netloc = f"{parsed.username}:****@{parsed.hostname}"
+            if parsed.port:
+                masked_netloc += f":{parsed.port}"
+        else:
+            masked_netloc = parsed.netloc
+        masked = urlunparse((parsed.scheme, masked_netloc, parsed.path, "", "", ""))
+        return masked
+    except Exception:
+        return "****"
+
+
+def _verify_checkpointer_tables(conn: Any) -> dict[str, bool]:
+    """checkpointer 관련 테이블 존재 여부 확인."""
+    tables_to_check = [
+        "checkpoints",
+        "checkpoint_blobs",
+        "checkpoint_writes",
+        "checkpoint_migrations",
+    ]
+    results = {}
+    try:
+        with conn.cursor() as cur:
+            for table_name in tables_to_check:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = %s
+                    )
+                    """,
+                    (table_name,),
+                )
+                exists = cur.fetchone()[0]
+                results[table_name] = exists
+    except Exception as e:
+        logger.error(f"테이블 존재 여부 확인 실패: {e}")
+        for table_name in tables_to_check:
+            results[table_name] = False
+    return results
+
+
 @asynccontextmanager
 async def initialize_database() -> AsyncIterator[Optional[Any]]:
     """단기 메모리(checkpointer) 초기화.
@@ -109,41 +158,119 @@ async def initialize_database() -> AsyncIterator[Optional[Any]]:
     # from_conn_string 는 contextmanager 를 반환하므로, "with" 로 들어가서
     # 실제 saver 인스턴스를 얻은 뒤 LangGraph checkpointer 로 넘겨야 한다.
     if settings.POSTGRES_URI:
+        masked_uri = _mask_connection_string(settings.POSTGRES_URI)
+        logger.info(f"[Checkpointer] PostgreSQL URI 설정 확인됨: {masked_uri}")
+
         try:
             from langgraph.checkpoint.postgres import PostgresSaver  # type: ignore[import]
 
-            logger.info(
-                "Initializing PostgreSQL checkpointer with sync PostgresSaver..."
-            )
+            logger.info("[Checkpointer] PostgresSaver 모듈 임포트 성공")
+            logger.info("[Checkpointer] PostgreSQL 연결 시도 중...")
+
             # from_conn_string 가 반환하는 contextmanager 안에서 실제 saver 를 획득
             with PostgresSaver.from_conn_string(settings.POSTGRES_URI) as saver:  # type: ignore[attr-defined]
+                logger.info("[Checkpointer] PostgreSQL 연결 성공")
+
+                # 연결 상태 확인
+                try:
+                    conn = saver.conn
+                    if hasattr(conn, "status"):
+                        logger.info(f"[Checkpointer] 연결 상태: status={conn.status}")
+                    if hasattr(conn, "info"):
+                        info = conn.info
+                        logger.info(
+                            f"[Checkpointer] 연결 정보: host={info.host}, port={info.port}, "
+                            f"dbname={info.dbname}, user={info.user}"
+                        )
+                except Exception as conn_info_error:
+                    logger.warning(
+                        f"[Checkpointer] 연결 정보 조회 실패 (무시 가능): {conn_info_error}"
+                    )
+
                 # 초기 실행 시 필요한 checkpoints 테이블 등이 없다면 생성한다.
                 try:
+                    logger.info("[Checkpointer] 테이블 스키마 setup 시작...")
                     saver.setup()  # type: ignore[attr-defined]
-                    logger.info("PostgreSQL checkpointer schema setup completed")
+                    logger.info(
+                        "[Checkpointer] PostgreSQL checkpointer 스키마 setup 완료"
+                    )
+
+                    # 테이블 생성 확인
+                    try:
+                        table_status = _verify_checkpointer_tables(saver.conn)
+                        logger.info(f"[Checkpointer] 테이블 상태 확인: {table_status}")
+                        missing_tables = [
+                            name for name, exists in table_status.items() if not exists
+                        ]
+                        if missing_tables:
+                            logger.warning(
+                                f"[Checkpointer] 다음 테이블이 존재하지 않음: {missing_tables}"
+                            )
+                        else:
+                            logger.info(
+                                "[Checkpointer] 모든 checkpointer 테이블 정상 존재"
+                            )
+                    except Exception as verify_error:
+                        logger.warning(
+                            f"[Checkpointer] 테이블 존재 확인 중 오류 (무시 가능): {verify_error}"
+                        )
+
                 except Exception as setup_error:  # pragma: no cover - fallback path
                     logger.error(
-                        "PostgreSQL checkpointer setup failed: %s",
-                        setup_error,
+                        f"[Checkpointer] PostgreSQL checkpointer setup 실패: {setup_error}",
+                    )
+                    logger.error(
+                        f"[Checkpointer] setup 실패 상세 - type: {type(setup_error).__name__}, "
+                        f"args: {setup_error.args}"
                     )
                     raise
 
-                logger.info("PostgreSQL checkpointer (sync) initialization completed")
+                logger.info("[Checkpointer] PostgreSQL checkpointer (sync) 초기화 완료")
                 # AsyncPregelLoop 에서 필요한 async 메소드를 제공하도록 래퍼로 감싼다.
                 async_saver = AsyncCheckpointerWrapper(saver)
                 yield async_saver
                 return
+
+        except ImportError as ie:
+            logger.error(
+                f"[Checkpointer] langgraph-checkpoint-postgres 패키지 임포트 실패: {ie}"
+            )
+            logger.error(
+                "[Checkpointer] 'pip install langgraph-checkpoint-postgres' 실행 필요"
+            )
+            yield None
+            return
         except Exception as e:  # pragma: no cover - fallback path
             logger.error(
-                "PostgresSaver initialization failed. Continuing without checkpointer: %s",
-                e,
+                f"[Checkpointer] PostgresSaver 초기화 실패 - type: {type(e).__name__}"
+            )
+            logger.error(f"[Checkpointer] 오류 메시지: {e}")
+            logger.error(f"[Checkpointer] 오류 상세: {e.args}")
+
+            # 연결 관련 오류인지 확인
+            error_str = str(e).lower()
+            if "connect" in error_str or "connection" in error_str:
+                logger.error(
+                    "[Checkpointer] 연결 오류 감지 - PostgreSQL 서버 상태 및 네트워크 확인 필요"
+                )
+            if "auth" in error_str or "password" in error_str:
+                logger.error(
+                    "[Checkpointer] 인증 오류 감지 - 사용자명/비밀번호 확인 필요"
+                )
+            if "timeout" in error_str:
+                logger.error(
+                    "[Checkpointer] 타임아웃 오류 감지 - 서버 응답 지연 또는 방화벽 확인 필요"
+                )
+
+            logger.warning(
+                "[Checkpointer] checkpointer 없이 계속 진행 (대화 히스토리 영속성 없음)"
             )
             yield None
             return
 
     # POSTGRES_URI 가 설정되지 않은 경우
     logger.warning(
-        "POSTGRES_URI not configured. Running without checkpointer (no conversation history persistence)."
+        "[Checkpointer] POSTGRES_URI 미설정. checkpointer 없이 실행 (대화 히스토리 영속성 없음)."
     )
     yield None
 

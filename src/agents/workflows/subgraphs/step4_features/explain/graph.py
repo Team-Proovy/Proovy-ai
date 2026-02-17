@@ -25,7 +25,6 @@ from agents.workflows.utils import (
     classify_difficulty,
     extract_ocr_text,
     get_conversation_summary,
-    get_difficulty_from_state,
     recent_user_context,
     set_difficulty_in_state,
 )
@@ -92,6 +91,7 @@ def explain(state: AgentState) -> AgentState:
         "examples": explain_result.examples,
     }
     state["final_output"] = final_output
+    state["prev_action"] = "Explain"
 
     return state
 
