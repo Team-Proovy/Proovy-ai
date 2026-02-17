@@ -174,12 +174,19 @@ Proovy-ai/
 ├── langgraph.json                # LangGraph Studio 설정
 ├── pyproject.toml                # uv 패키지 관리 설정
 ├── README.md
+├── SSE_PROTOCOL_V2.md            # SSE v2 프로토콜 명세
 └── uv.lock
 ```
 
 ### PDF 생성 엔진 (E2B)
 
 해설 PDF 생성 기능은 [E2B Code Interpreter](https://e2b.dev/) 보안 샌드박스 내에서 동적으로 Python 코드를 실행하여 처리됩니다. LaTeX 수식 렌더링 및 차트 생성을 위해 외부 샌드박스 환경을 활용합니다.
+
+### 스트리밍 프로토콜
+
+- `POST /stream`, `POST /{agent_id}/stream`: 기존 SSE(v1) 하위호환
+- `POST /stream/v2`, `POST /{agent_id}/stream/v2`: event 중심 SSE(v2)
+- v2 상세 명세: `SSE_PROTOCOL_V2.md`
 
 ### 워크플로우 시각화 (LangGraph Studio)
 
