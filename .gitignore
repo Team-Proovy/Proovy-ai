@@ -51,3 +51,4 @@ debug_*.py
 src/rag/debug_similarity.py
 src/rag/reset_db.py
 src/rag/seed_data.py
+

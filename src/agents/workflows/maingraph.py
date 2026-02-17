@@ -10,6 +10,7 @@
 """
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 
 from agents.state import AgentState, CreditState
@@ -17,6 +18,7 @@ from agents.prompts.maingraph_prompts import build_simple_response_system_prompt
 from core.llm import get_model
 from agents.workflows.review_logic import run_review, run_suggestion
 from agents.workflows.final_response import final_response
+from agents.workflows.retry_trace import env_truthy, retry_trace_log
 from agents.workflows.utils import (
     check_credit_sufficient,
     get_difficulty_from_state,
@@ -70,65 +72,77 @@ FEATURE_MAP = {
 }
 
 # Review 재시도 상한은 Router의 RetryCounter에서 관리한다.
+FORCE_REVIEW_FAIL_ENV = "FORCE_REVIEW_FAIL"
 
 # --- Main Graph Nodes (서브그래프에 없는 노드들) ---
 
 
-def review(state: AgentState) -> AgentState:
+def review(state: AgentState, config: RunnableConfig | None = None) -> AgentState:
     print("---MAIN: REVIEWING---")
-    try:
-        patch = run_review(state) or {}
-    except Exception as exc:
-        print("run_review error:", exc)
-        current_retry = state.get("retry_count", 0)
+    current_retry = int(state.get("retry_count", 0) or 0)
+
+    if env_truthy(FORCE_REVIEW_FAIL_ENV, default="false"):
         patch = {
             "review_state": {
                 "passed": False,
-                "feedback": "리뷰 내부 오류(자동 재시도 예정)",
+                "feedback": "Forced review failure for retry simulation.",
                 "suggestions": [],
+                "reasons": ["forced_failure"],
                 "retry_count": current_retry,
             }
         }
+    else:
+        try:
+            patch = run_review(state) or {}
+        except Exception as exc:
+            print("run_review error:", exc)
+            patch = {
+                "review_state": {
+                    "passed": False,
+                    "feedback": "리뷰 내부 오류(자동 재시도 예정)",
+                    "suggestions": [],
+                    "retry_count": current_retry,
+                }
+            }
 
     review_state = patch.get("review_state") or state.get("review_state")
     passed = True
-    retry_count = state.get("retry_count", 0) or 0
     if review_state is not None:
         if isinstance(review_state, dict):
-            passed = review_state.get("passed", True)
+            passed = bool(review_state.get("passed", True))
         else:
-            passed = getattr(review_state, "passed", True)
+            passed = bool(getattr(review_state, "passed", True))
+
     if isinstance(review_state, dict):
-        review_state["retry_count"] = retry_count
+        review_state["retry_count"] = current_retry
 
-    # RetryCounter에서 state 업데이트가 누락되므로, 여기서 카운트를 관리한다.
-    retry_count = state.get("retry_count", 0) or 0
-    if not passed:
-        retry_count += 1
-    patch["retry_count"] = retry_count
-
-    # RetryCounter가 업데이트하지 못하는 retry_limit_exceeded도 여기서 관리
-    if not passed and retry_count > 2:
-        patch["retry_limit_exceeded"] = True
-    else:
-        # 기존 값이 남지 않도록 명시적으로 false 처리
+    if passed:
         patch["retry_limit_exceeded"] = False
-
-    if isinstance(review_state, dict):
-        review_state["retry_count"] = retry_count
-
-    should_retry = not passed
-    if patch.get("retry_limit_exceeded"):
-        should_retry = False
-
-    # meta
-    patch["prev_action"] = "Review"
-    if patch.get("retry_limit_exceeded"):
+        patch["next_action"] = "Suggestion"
+        retry_trace_log(
+            event="exit_retry_loop",
+            retry_count=current_retry,
+            node="Review",
+            state=state,
+            config=config,
+            level="info",
+        )
+    elif state.get("retry_limit_exceeded"):
         patch["next_action"] = "Fallback"
+        retry_trace_log(
+            event="exit_retry_loop",
+            retry_count=current_retry,
+            node="Review",
+            state=state,
+            config=config,
+            level="warning",
+        )
     else:
-        patch["next_action"] = "RetryCounter" if should_retry else "Suggestion"
+        patch["next_action"] = "RetryCounter"
 
-    # Merge patch into state, then return full state so Studio shows updated state
+    patch["retry_count"] = current_retry
+    patch["prev_action"] = "Review"
+
     state.update(patch)
     return state
 
@@ -438,6 +452,13 @@ def route_to_feature(state: AgentState) -> str:
     if state.get("prev_action") == "Intent":
         return "RAG"
     if state.get("retry_limit_exceeded"):
+        retry_trace_log(
+            event="exit_retry_loop",
+            retry_count=int(state.get("retry_count", 0) or 0),
+            node="Router",
+            state=state,
+            level="warning",
+        )
         return "Fallback"
 
     step = state.get("current_step", "")
@@ -522,7 +543,7 @@ builder.add_edge("Simple_response", "FinalResponse")
 builder.add_edge("CreditInsufficient", "FinalResponse")
 builder.add_edge("FinalResponse", END)
 
-
+graph = builder.compile()
 # "agent": "src.agents.workflows.maingraph:graph"
 # checkpointer를 주입하기 위해 builder만 export하고, 컴파일은 agents.py에서 수행
 graph_builder = builder
