@@ -7,12 +7,14 @@ FastAPI 서비스 엔트리포인트.
   SSE(text/event-stream) 형식으로 변환해 클라이언트에 반환한다.
 """
 
+import asyncio
 import inspect
 import json
 import logging
 import warnings
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from time import monotonic
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -55,6 +57,12 @@ from service.utils import (
     remove_tool_calls,
 )
 from service.credit_service import get_credit_service, normalize_auth_token
+from service.sse_v2 import (
+    CHAT_MESSAGE_KIND_ASSISTANT_FINAL,
+    SseV2Emitter,
+    chat_kind_from_message,
+    chat_role_from_type,
+)
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
@@ -63,6 +71,62 @@ logger = logging.getLogger(__name__)
 # HTTP requests don't look like errors in the service logs.
 logging.getLogger("e2b.api").setLevel(logging.WARNING)
 logging.getLogger("e2b.api.client_sync").setLevel(logging.WARNING)
+
+
+PROGRESS_MESSAGES: dict[str, str] = {
+    "CheckType": "첨부된 파일 유형을 분석하고 있습니다.",
+    "FileConvert": "문서를 이미지로 변환하고 있습니다.",
+    "VisionLLM": "이미지에서 텍스트와 수식을 추출하고 있습니다.",
+    "Intent": "질문의 의도를 분석하고 있습니다.",
+    "Planner": "여러 단계의 학습 계획을 세우고 있습니다.",
+    "Executor": "계획된 단계를 실행할 준비를 하고 있습니다.",
+    "RetryCounter": "이전 시도가 충분했는지 확인하고 있습니다.",
+    "EmbeddingSearch": "관련 자료를 검색하고 있습니다.",
+    "RelevanceCheck": "검색된 자료의 관련성을 평가하고 있습니다.",
+    "RetrievedDocs": "검색된 자료를 컨텍스트에 주입하고 있습니다.",
+    "Solve_Analysis": "문제를 분석하고 필요한 정보를 정리하고 있습니다.",
+    "Solve_Strategy": "문제 풀이 전략과 코드를 생성하고 있습니다.",
+    "Solve_Computation": "파이썬 코드를 실제로 실행 중입니다.",
+    "Solve_Writer": "풀이 결과를 정리하여 답변을 작성하고 있습니다.",
+    "Explain": "질문 내용을 쉽게 설명할 방법을 정리하고 있습니다.",
+    "Explain_Writer": "개념 설명을 작성하고 있습니다.",
+    "CreateGraph": "문제 상황을 그래프로 시각화할 방법을 고민하고 있습니다.",
+    "Variant": "비슷한 유형의 변형 문제를 생성하고 있습니다.",
+    "Solution": "풀이 과정을 정리하고 있습니다.",
+    "Check": "답이 올바른지 검산하고 있습니다.",
+    "Review": "전체 풀이 결과를 자동으로 리뷰하고 있습니다.",
+    "Suggestion": "다음 학습 방향에 대한 제안을 준비하고 있습니다.",
+}
+STREAM_V2_HEARTBEAT_INTERVAL_SEC = 15.0
+
+
+def _normalize_node_name(node: Any) -> str:
+    return str(node).split("/")[-1]
+
+
+def _normalize_node_path(node_path: Any | None, node: Any) -> str:
+    if node_path is None:
+        return str(node)
+    if isinstance(node_path, (tuple, list)):
+        return "/".join(str(part) for part in node_path)
+    return str(node_path)
+
+
+def _coalesce_messages(new_messages: list[Any]) -> list[Any]:
+    processed_messages: list[Any] = []
+    current_message: dict[str, Any] = {}
+    for message in new_messages:
+        if isinstance(message, tuple):
+            key, value = message
+            current_message[key] = value
+            continue
+        if current_message:
+            processed_messages.append(_create_ai_message(current_message))
+            current_message = {}
+        processed_messages.append(message)
+    if current_message:
+        processed_messages.append(_create_ai_message(current_message))
+    return processed_messages
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:
@@ -290,30 +354,7 @@ async def message_generator(
         "difficulty": "easy",
     }
 
-    progress_messages: dict[str, str] = {
-        "CheckType": "첨부된 파일 유형을 분석하고 있습니다.",
-        "FileConvert": "문서를 이미지로 변환하고 있습니다.",
-        "VisionLLM": "이미지에서 텍스트와 수식을 추출하고 있습니다.",
-        "Intent": "질문의 의도를 분석하고 있습니다.",
-        "Planner": "여러 단계의 학습 계획을 세우고 있습니다.",
-        "Executor": "계획된 단계를 실행할 준비를 하고 있습니다.",
-        "RetryCounter": "이전 시도가 충분했는지 확인하고 있습니다.",
-        "EmbeddingSearch": "관련 자료를 검색하고 있습니다.",
-        "RelevanceCheck": "검색된 자료의 관련성을 평가하고 있습니다.",
-        "RetrievedDocs": "검색된 자료를 컨텍스트에 주입하고 있습니다.",
-        "Solve_Analysis": "문제를 분석하고 필요한 정보를 정리하고 있습니다.",
-        "Solve_Strategy": "문제 풀이 전략과 코드를 생성하고 있습니다.",
-        "Solve_Computation": "파이썬 코드를 실제로 실행 중입니다.",
-        "Solve_Writer": "풀이 결과를 정리하여 답변을 작성하고 있습니다.",
-        "Explain": "질문 내용을 쉽게 설명할 방법을 정리하고 있습니다.",
-        "Explain_Writer": "개념 설명을 작성하고 있습니다.",
-        "CreateGraph": "문제 상황을 그래프로 시각화할 방법을 고민하고 있습니다.",
-        "Variant": "비슷한 유형의 변형 문제를 생성하고 있습니다.",
-        "Solution": "풀이 과정을 정리하고 있습니다.",
-        "Check": "답이 올바른지 검산하고 있습니다.",
-        "Review": "전체 풀이 결과를 자동으로 리뷰하고 있습니다.",
-        "Suggestion": "다음 학습 방향에 대한 제안을 준비하고 있습니다.",
-    }
+    progress_messages = PROGRESS_MESSAGES
     emitted_progress_nodes: set[str] = set()
 
     def emit_progress(node_name: str) -> str | None:
@@ -481,6 +522,559 @@ async def message_generator(
         yield "data: [DONE]\n\n"
 
 
+async def message_generator_v2(
+    user_input: StreamInput, agent_id: str = DEFAULT_AGENT
+) -> AsyncGenerator[str, None]:
+    """Generate an SSE v2 stream with event-oriented payloads."""
+    agent: AgentGraph = get_agent(agent_id)
+    kwargs, run_id_obj, thread_id = await _handle_input(user_input, agent)
+    run_id = str(run_id_obj)
+    emitter = SseV2Emitter(run_id=run_id, thread_id=thread_id)
+    run_started_at = monotonic()
+    heartbeat_interval_sec = STREAM_V2_HEARTBEAT_INTERVAL_SEC
+
+    emitted_progress_nodes: set[str] = set()
+    node_started_at: dict[str, float] = {}
+    node_completed: set[str] = set()
+    emitted_artifacts: set[str] = set()
+    last_credit_signature: tuple[Any, Any, Any] | None = None
+
+    chat_message_count = 0
+    llm_message_count = 0
+    active_llm_message_id: str | None = None
+    active_llm_node: str | None = None
+    active_llm_token_index = 0
+    final_message_id: str | None = None
+    terminal_emitted = False
+    emitted_chat_signatures: set[str] = set()
+    tool_started_at: dict[str, float] = {}
+
+    def next_message_id(prefix: str) -> str:
+        nonlocal chat_message_count
+        chat_message_count += 1
+        return f"{prefix}_{chat_message_count}"
+
+    def sanitize_error_message(_: Exception) -> str:
+        return "Internal server error"
+
+    def emit_chat_events(raw_message: Any, node_name: str | None) -> list[str]:
+        nonlocal final_message_id
+        events: list[str] = []
+        try:
+            chat_message = langchain_to_chat_message(raw_message)
+            chat_message.run_id = run_id
+        except Exception as e:
+            logger.error(f"Error parsing v2 chat message: {e}")
+            events.append(
+                emitter.emit(
+                    "chat.message",
+                    {
+                        "message_id": next_message_id("m_error"),
+                        "role": "system",
+                        "kind": "system_notice",
+                        "content": "Unexpected error",
+                    },
+                )
+            )
+            return events
+
+        if chat_message.type == "human" and chat_message.content == user_input.message:
+            return events
+
+        message_id = next_message_id("m_chat")
+        kind = chat_kind_from_message(
+            message_type=chat_message.type,
+            node_name=node_name,
+            custom_data=chat_message.custom_data,
+        )
+        signature = (
+            f"{chat_message.type}|{kind}|{node_name or ''}|{chat_message.content}"
+        )
+        if signature in emitted_chat_signatures:
+            return events
+        emitted_chat_signatures.add(signature)
+        payload: dict[str, Any] = {
+            "message_id": message_id,
+            "role": chat_role_from_type(chat_message.type),
+            "kind": kind,
+            "content": chat_message.content,
+        }
+        if node_name:
+            payload["node"] = node_name
+        events.append(emitter.emit("chat.message", payload))
+
+        if kind == CHAT_MESSAGE_KIND_ASSISTANT_FINAL:
+            final_message_id = message_id
+        return events
+
+    def emit_interrupt_event(interrupt: Any, node_name: str | None) -> str | None:
+        nonlocal final_message_id
+        content = str(getattr(interrupt, "value", interrupt))
+        signature = f"interrupt|system_notice|{node_name or ''}|{content}"
+        if signature in emitted_chat_signatures:
+            return None
+        emitted_chat_signatures.add(signature)
+
+        message_id = next_message_id("m_interrupt")
+        final_message_id = message_id
+        payload: dict[str, Any] = {
+            "message_id": message_id,
+            "role": "assistant",
+            "kind": "system_notice",
+            "content": content,
+        }
+        if node_name:
+            payload["node"] = node_name
+        return emitter.emit("chat.message", payload)
+
+    def _coerce_state_dict(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "model_dump"):
+            dumped = value.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+        return {}
+
+    def _node_name_from_event(stream_event: dict[str, Any]) -> str | None:
+        metadata = stream_event.get("metadata")
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+        node = metadata_dict.get("langgraph_node") or metadata_dict.get("node")
+        if node:
+            return _normalize_node_name(node)
+
+        name = stream_event.get("name")
+        if isinstance(name, str):
+            normalized = _normalize_node_name(name)
+            if normalized in PROGRESS_MESSAGES or normalized in {"FinalResponse"}:
+                return normalized
+        return None
+
+    def _node_path_from_event(
+        stream_event: dict[str, Any], node_name: str | None
+    ) -> str:
+        metadata = stream_event.get("metadata")
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+        raw_path = metadata_dict.get("langgraph_path") or metadata_dict.get("node_path")
+        if isinstance(raw_path, (tuple, list)):
+            path = "/".join(str(item) for item in raw_path if str(item))
+            if path:
+                return path
+        elif isinstance(raw_path, str) and raw_path.strip():
+            return raw_path
+        return node_name or ""
+
+    def _extract_finish_reason(end_data: dict[str, Any]) -> str:
+        output = end_data.get("output")
+        response_metadata = getattr(output, "response_metadata", None)
+        if isinstance(response_metadata, dict):
+            finish_reason = response_metadata.get("finish_reason")
+            if finish_reason is not None:
+                return str(finish_reason)
+        return "stop"
+
+    def _extract_delta_from_chunk(chunk: Any) -> str:
+        if isinstance(chunk, AIMessageChunk):
+            content = remove_tool_calls(chunk.content)
+            if not content:
+                return ""
+            return convert_message_content_to_string(content)
+
+        content = getattr(chunk, "content", None)
+        if isinstance(content, (str, list)):
+            filtered = remove_tool_calls(content)
+            if not filtered:
+                return ""
+            return convert_message_content_to_string(filtered)
+
+        if isinstance(chunk, str):
+            return chunk
+        if isinstance(chunk, dict):
+            text = chunk.get("text")
+            if isinstance(text, str):
+                return text
+        return ""
+
+    def _events_from_state_like(
+        state_like: dict[str, Any], node_name: str | None
+    ) -> list[str]:
+        nonlocal last_credit_signature
+        lines: list[str] = []
+        credit_state = state_like.get("credit_state")
+        if isinstance(credit_state, dict):
+            signature = (
+                credit_state.get("balance"),
+                credit_state.get("total_cost"),
+                credit_state.get("difficulty"),
+            )
+            if signature != last_credit_signature:
+                last_credit_signature = signature
+                balance = credit_state.get("balance", 0)
+                total_cost = credit_state.get("total_cost", 0)
+                remaining = 0
+                if isinstance(balance, (int, float)) and isinstance(
+                    total_cost, (int, float)
+                ):
+                    remaining = balance - total_cost
+                lines.append(
+                    emitter.emit(
+                        "credit.updated",
+                        {
+                            "balance": balance,
+                            "total_cost": total_cost,
+                            "remaining": remaining,
+                        },
+                    )
+                )
+
+        final_output = state_like.get("final_output")
+        solution_output = (
+            final_output.get("solution") if isinstance(final_output, dict) else None
+        )
+        if isinstance(solution_output, dict):
+            artifact_path = solution_output.get("pdf_path")
+            if artifact_path:
+                artifact_id = str(solution_output.get("pdf_file_name") or artifact_path)
+                if artifact_id not in emitted_artifacts:
+                    emitted_artifacts.add(artifact_id)
+                    lines.append(
+                        emitter.emit(
+                            "artifact.ready",
+                            {
+                                "artifact_id": artifact_id,
+                                "name": solution_output.get("pdf_file_name")
+                                or artifact_id,
+                                "mime": solution_output.get(
+                                    "pdf_mime_type", "application/pdf"
+                                ),
+                                "path": artifact_path,
+                                "size": solution_output.get("pdf_file_size", 0),
+                            },
+                        )
+                    )
+
+        if node_name == "FinalResponse":
+            messages = state_like.get("messages")
+            if isinstance(messages, list) and messages:
+                final_candidate = messages[-1]
+                for sse_line in emit_chat_events(final_candidate, node_name):
+                    lines.append(sse_line)
+
+        return lines
+
+    async def _pump_stream(queue: asyncio.Queue[tuple[str, Any]]) -> None:
+        try:
+            async for stream_event in agent.astream_events(
+                kwargs["input"],
+                kwargs["config"],
+                version="v2",
+            ):
+                await queue.put(("event", stream_event))
+        except Exception as exc:
+            await queue.put(("error", exc))
+        finally:
+            await queue.put(("done", None))
+
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    pump_task = asyncio.create_task(_pump_stream(queue))
+
+    try:
+        yield emitter.emit(
+            "session.metadata",
+            {
+                "agent_id": agent_id,
+                "capabilities": {
+                    "token_stream": True,
+                    "heartbeat": True,
+                    "terminal_event": True,
+                },
+            },
+        )
+        yield emitter.emit(
+            "run.started", {"stream_tokens": bool(user_input.stream_tokens)}
+        )
+
+        while True:
+            try:
+                item_type, item = await asyncio.wait_for(
+                    queue.get(), timeout=heartbeat_interval_sec
+                )
+            except asyncio.TimeoutError:
+                yield emitter.emit("heartbeat", {"alive": True})
+                continue
+
+            if item_type == "done":
+                break
+            if item_type == "error":
+                raise item
+
+            stream_event = item
+            if not isinstance(stream_event, dict):
+                continue
+
+            event_name = str(stream_event.get("event") or "")
+            data = stream_event.get("data")
+            data_dict = data if isinstance(data, dict) else {}
+            metadata = stream_event.get("metadata")
+            metadata_dict = metadata if isinstance(metadata, dict) else {}
+            tags = stream_event.get("tags")
+            tag_list = tags if isinstance(tags, list) else []
+
+            node_name = _node_name_from_event(stream_event)
+            node_path_str = _node_path_from_event(stream_event, node_name)
+
+            if event_name == "on_chain_start" and node_name:
+                if node_name not in node_started_at:
+                    node_started_at[node_name] = monotonic()
+                    yield emitter.emit(
+                        "node.started",
+                        {"node": node_name, "node_path": node_path_str},
+                    )
+                    progress = PROGRESS_MESSAGES.get(node_name)
+                    if progress and node_name not in emitted_progress_nodes:
+                        emitted_progress_nodes.add(node_name)
+                        yield emitter.emit(
+                            "node.progress",
+                            {"node": node_name, "message": progress},
+                        )
+                continue
+
+            if event_name == "on_chain_stream":
+                state_patch = _coerce_state_dict(data_dict.get("chunk"))
+                if state_patch:
+                    if isinstance(state_patch.get("__interrupt__"), list):
+                        interrupt: Interrupt
+                        for interrupt in state_patch["__interrupt__"]:
+                            interrupt_event = emit_interrupt_event(interrupt, node_name)
+                            if interrupt_event:
+                                yield interrupt_event
+                    for line in _events_from_state_like(state_patch, node_name):
+                        yield line
+                continue
+
+            if event_name == "on_chain_end" and node_name:
+                state_output = _coerce_state_dict(data_dict.get("output"))
+                if state_output:
+                    if isinstance(state_output.get("__interrupt__"), list):
+                        interrupt: Interrupt
+                        for interrupt in state_output["__interrupt__"]:
+                            interrupt_event = emit_interrupt_event(interrupt, node_name)
+                            if interrupt_event:
+                                yield interrupt_event
+                    for line in _events_from_state_like(state_output, node_name):
+                        yield line
+
+                if node_name not in node_completed:
+                    node_completed.add(node_name)
+                    started_at = node_started_at.get(node_name, monotonic())
+                    duration_ms = max(0, int((monotonic() - started_at) * 1000))
+                    yield emitter.emit(
+                        "node.completed",
+                        {
+                            "node": node_name,
+                            "status": "success",
+                            "duration_ms": duration_ms,
+                        },
+                    )
+                continue
+
+            if event_name == "on_custom_event":
+                custom_payload = stream_event.get("data")
+                if isinstance(custom_payload, dict):
+                    custom_message = ChatMessage(
+                        type="custom",
+                        content="",
+                        custom_data=custom_payload,
+                    )
+                    for line in emit_chat_events(custom_message, node_name):
+                        yield line
+                continue
+
+            if event_name == "on_tool_start":
+                tool_call_id = str(
+                    stream_event.get("run_id") or next_message_id("tool_call")
+                )
+                tool_started_at[tool_call_id] = monotonic()
+                tool_name = str(stream_event.get("name") or "tool")
+                yield emitter.emit(
+                    "tool.call.started",
+                    {"tool_call_id": tool_call_id, "tool_name": tool_name},
+                )
+                continue
+
+            if event_name == "on_tool_end":
+                tool_call_id = str(
+                    stream_event.get("run_id") or next_message_id("tool_call")
+                )
+                started_at = tool_started_at.pop(tool_call_id, monotonic())
+                duration_ms = max(0, int((monotonic() - started_at) * 1000))
+                yield emitter.emit(
+                    "tool.call.completed",
+                    {
+                        "tool_call_id": tool_call_id,
+                        "status": "success",
+                        "duration_ms": duration_ms,
+                    },
+                )
+                continue
+
+            if event_name == "on_chat_model_start":
+                if not user_input.stream_tokens:
+                    continue
+                if "skip_stream" in tag_list:
+                    continue
+
+                token_node = str(
+                    metadata_dict.get("langgraph_node")
+                    or metadata_dict.get("node")
+                    or node_name
+                    or active_llm_node
+                    or "unknown"
+                )
+
+                if token_node not in node_started_at:
+                    node_started_at[token_node] = monotonic()
+                    yield emitter.emit(
+                        "node.started",
+                        {"node": token_node, "node_path": token_node},
+                    )
+                    progress = PROGRESS_MESSAGES.get(token_node)
+                    if progress and token_node not in emitted_progress_nodes:
+                        emitted_progress_nodes.add(token_node)
+                        yield emitter.emit(
+                            "node.progress",
+                            {"node": token_node, "message": progress},
+                        )
+
+                if active_llm_message_id is not None:
+                    yield emitter.emit(
+                        "llm.message.completed",
+                        {
+                            "message_id": active_llm_message_id,
+                            "finish_reason": "switch",
+                        },
+                    )
+
+                llm_message_count += 1
+                active_llm_message_id = f"m_llm_{llm_message_count}"
+                active_llm_node = token_node
+                active_llm_token_index = 0
+                yield emitter.emit(
+                    "llm.message.started",
+                    {
+                        "message_id": active_llm_message_id,
+                        "node": token_node,
+                        "role": "assistant",
+                    },
+                )
+                continue
+
+            if event_name == "on_chat_model_stream":
+                if not user_input.stream_tokens:
+                    continue
+                if "skip_stream" in tag_list:
+                    continue
+
+                token_node = str(
+                    metadata_dict.get("langgraph_node")
+                    or metadata_dict.get("node")
+                    or active_llm_node
+                    or "unknown"
+                )
+                if active_llm_message_id is None:
+                    llm_message_count += 1
+                    active_llm_message_id = f"m_llm_{llm_message_count}"
+                    active_llm_node = token_node
+                    active_llm_token_index = 0
+                    yield emitter.emit(
+                        "llm.message.started",
+                        {
+                            "message_id": active_llm_message_id,
+                            "node": token_node,
+                            "role": "assistant",
+                        },
+                    )
+
+                delta = _extract_delta_from_chunk(data_dict.get("chunk"))
+                if not delta:
+                    continue
+
+                yield emitter.emit(
+                    "llm.token.delta",
+                    {
+                        "message_id": active_llm_message_id,
+                        "node": token_node,
+                        "delta": delta,
+                        "index": active_llm_token_index,
+                    },
+                )
+                active_llm_token_index += 1
+                continue
+
+            if event_name == "on_chat_model_end":
+                if not user_input.stream_tokens:
+                    continue
+                if "skip_stream" in tag_list:
+                    continue
+                if active_llm_message_id is not None:
+                    yield emitter.emit(
+                        "llm.message.completed",
+                        {
+                            "message_id": active_llm_message_id,
+                            "finish_reason": _extract_finish_reason(data_dict),
+                        },
+                    )
+                    active_llm_message_id = None
+                    active_llm_node = None
+                    active_llm_token_index = 0
+                continue
+
+    except Exception as e:
+        logger.exception("Error in message generator v2")
+        if active_llm_message_id is not None:
+            yield emitter.emit(
+                "llm.message.completed",
+                {
+                    "message_id": active_llm_message_id,
+                    "finish_reason": "error",
+                },
+            )
+            active_llm_message_id = None
+        if not terminal_emitted:
+            terminal_emitted = True
+            yield emitter.emit(
+                "run.failed",
+                {
+                    "code": "internal_error",
+                    "message": sanitize_error_message(e),
+                    "retryable": False,
+                },
+            )
+    finally:
+        if not pump_task.done():
+            pump_task.cancel()
+            try:
+                await pump_task
+            except asyncio.CancelledError:
+                pass
+
+        if not terminal_emitted:
+            if active_llm_message_id is not None:
+                yield emitter.emit(
+                    "llm.message.completed",
+                    {
+                        "message_id": active_llm_message_id,
+                        "finish_reason": "stop",
+                    },
+                )
+            terminal_emitted = True
+            duration_ms = int((monotonic() - run_started_at) * 1000)
+            payload: dict[str, Any] = {"duration_ms": duration_ms}
+            if final_message_id:
+                payload["final_message_id"] = final_message_id
+            yield emitter.emit("run.completed", payload)
+
+
 def _create_ai_message(parts: dict) -> AIMessage:
     sig = inspect.signature(AIMessage)
     valid_keys = set(sig.parameters)
@@ -527,6 +1121,52 @@ async def stream(
     """
     return StreamingResponse(
         message_generator(user_input, agent_id),
+        media_type="text/event-stream",
+    )
+
+
+def _sse_v2_response_example() -> dict[int | str, Any]:
+    return {
+        status.HTTP_200_OK: {
+            "description": "Server Sent Event Response (Protocol v2)",
+            "content": {
+                "text/event-stream": {
+                    "example": (
+                        "id: 8d1f:1\n"
+                        "event: session.metadata\n"
+                        'data: {"v":"2.0","seq":1,"run_id":"8d1f","thread_id":"a21c"}\n\n'
+                        "id: 8d1f:2\n"
+                        "event: run.completed\n"
+                        'data: {"v":"2.0","seq":2,"run_id":"8d1f","thread_id":"a21c","duration_ms":1200}\n\n'
+                    ),
+                    "schema": {"type": "string"},
+                }
+            },
+        }
+    }
+
+
+@router.post(
+    "/{agent_id}/stream/v2",
+    response_class=StreamingResponse,
+    responses=_sse_v2_response_example(),
+    operation_id="stream_v2_with_agent_id",
+)
+@router.post(
+    "/stream/v2",
+    response_class=StreamingResponse,
+    responses=_sse_v2_response_example(),
+)
+async def stream_v2(
+    user_input: StreamInput, agent_id: str = DEFAULT_AGENT
+) -> StreamingResponse:
+    """Stream SSE protocol v2 events.
+
+    v2 keeps `/stream` untouched and introduces event-oriented semantics at
+    `/stream/v2` for explicit client-side state handling.
+    """
+    return StreamingResponse(
+        message_generator_v2(user_input, agent_id),
         media_type="text/event-stream",
     )
 
@@ -612,6 +1252,12 @@ app.include_router(router)
 # POST /{agent_id}/stream
 
 # 특정 agent_id 에이전트에 대해 위와 동일하게 SSE 스트리밍을 수행.
+# POST /stream/v2
+
+# v2 프로토콜(event/id/data + envelope) 기반 SSE 스트리밍.
+# POST /{agent_id}/stream/v2
+
+# 특정 agent_id 에이전트에 대해 v2 SSE 스트리밍 수행.
 # POST /feedback
 
 # LangSmith에 피드백(run_id, key, score, 추가 kwargs)을 기록하는 래퍼 엔드포인트.
