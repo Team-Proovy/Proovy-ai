@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 SSE_V2_VERSION = "2.0"
+SSE_V2_RESERVED_ENVELOPE_KEYS = {"v", "ts", "seq", "run_id", "thread_id"}
 
 CHAT_MESSAGE_KIND_STATUS = "status"
 CHAT_MESSAGE_KIND_ASSISTANT_PARTIAL = "assistant_partial"
@@ -53,7 +54,13 @@ class SseV2Emitter:
             "thread_id": self.thread_id,
         }
         if payload:
-            data.update(payload)
+            data.update(
+                {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in SSE_V2_RESERVED_ENVELOPE_KEYS
+                }
+            )
         event_id = f"{self.run_id}:{self.seq}"
         return (
             f"id: {event_id}\n"
@@ -103,4 +110,3 @@ def chat_kind_from_message(
         return CHAT_MESSAGE_KIND_ASSISTANT_PARTIAL
 
     return CHAT_MESSAGE_KIND_SYSTEM_NOTICE
-

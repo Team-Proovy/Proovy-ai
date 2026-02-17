@@ -554,6 +554,9 @@ async def message_generator_v2(
         chat_message_count += 1
         return f"{prefix}_{chat_message_count}"
 
+    def sanitize_error_message(_: Exception) -> str:
+        return "Internal server error"
+
     def emit_chat_events(raw_message: Any, node_name: str | None) -> list[str]:
         nonlocal final_message_id
         events: list[str] = []
@@ -584,7 +587,9 @@ async def message_generator_v2(
             node_name=node_name,
             custom_data=chat_message.custom_data,
         )
-        signature = f"{chat_message.type}|{kind}|{node_name or ''}|{chat_message.content}"
+        signature = (
+            f"{chat_message.type}|{kind}|{node_name or ''}|{chat_message.content}"
+        )
         if signature in emitted_chat_signatures:
             return events
         emitted_chat_signatures.add(signature)
@@ -598,22 +603,29 @@ async def message_generator_v2(
             payload["node"] = node_name
         events.append(emitter.emit("chat.message", payload))
 
-        if chat_message.type == "tool":
-            events.append(
-                emitter.emit(
-                    "tool.call.completed",
-                    {
-                        "tool_call_id": chat_message.tool_call_id
-                        or next_message_id("tool_call"),
-                        "status": "success",
-                        "duration_ms": 0,
-                    },
-                )
-            )
-
         if kind == CHAT_MESSAGE_KIND_ASSISTANT_FINAL:
             final_message_id = message_id
         return events
+
+    def emit_interrupt_event(interrupt: Any, node_name: str | None) -> str | None:
+        nonlocal final_message_id
+        content = str(getattr(interrupt, "value", interrupt))
+        signature = f"interrupt|system_notice|{node_name or ''}|{content}"
+        if signature in emitted_chat_signatures:
+            return None
+        emitted_chat_signatures.add(signature)
+
+        message_id = next_message_id("m_interrupt")
+        final_message_id = message_id
+        payload: dict[str, Any] = {
+            "message_id": message_id,
+            "role": "assistant",
+            "kind": "system_notice",
+            "content": content,
+        }
+        if node_name:
+            payload["node"] = node_name
+        return emitter.emit("chat.message", payload)
 
     def _coerce_state_dict(value: Any) -> dict[str, Any]:
         if isinstance(value, dict):
@@ -638,7 +650,9 @@ async def message_generator_v2(
                 return normalized
         return None
 
-    def _node_path_from_event(stream_event: dict[str, Any], node_name: str | None) -> str:
+    def _node_path_from_event(
+        stream_event: dict[str, Any], node_name: str | None
+    ) -> str:
         metadata = stream_event.get("metadata")
         metadata_dict = metadata if isinstance(metadata, dict) else {}
         raw_path = metadata_dict.get("langgraph_path") or metadata_dict.get("node_path")
@@ -681,7 +695,9 @@ async def message_generator_v2(
                 return text
         return ""
 
-    def _events_from_state_like(state_like: dict[str, Any], node_name: str | None) -> list[str]:
+    def _events_from_state_like(
+        state_like: dict[str, Any], node_name: str | None
+    ) -> list[str]:
         nonlocal last_credit_signature
         lines: list[str] = []
         credit_state = state_like.get("credit_state")
@@ -696,7 +712,9 @@ async def message_generator_v2(
                 balance = credit_state.get("balance", 0)
                 total_cost = credit_state.get("total_cost", 0)
                 remaining = 0
-                if isinstance(balance, (int, float)) and isinstance(total_cost, (int, float)):
+                if isinstance(balance, (int, float)) and isinstance(
+                    total_cost, (int, float)
+                ):
                     remaining = balance - total_cost
                 lines.append(
                     emitter.emit(
@@ -710,7 +728,9 @@ async def message_generator_v2(
                 )
 
         final_output = state_like.get("final_output")
-        solution_output = final_output.get("solution") if isinstance(final_output, dict) else None
+        solution_output = (
+            final_output.get("solution") if isinstance(final_output, dict) else None
+        )
         if isinstance(solution_output, dict):
             artifact_path = solution_output.get("pdf_path")
             if artifact_path:
@@ -722,8 +742,11 @@ async def message_generator_v2(
                             "artifact.ready",
                             {
                                 "artifact_id": artifact_id,
-                                "name": solution_output.get("pdf_file_name") or artifact_id,
-                                "mime": solution_output.get("pdf_mime_type", "application/pdf"),
+                                "name": solution_output.get("pdf_file_name")
+                                or artifact_id,
+                                "mime": solution_output.get(
+                                    "pdf_mime_type", "application/pdf"
+                                ),
                                 "path": artifact_path,
                                 "size": solution_output.get("pdf_file_size", 0),
                             },
@@ -745,8 +768,6 @@ async def message_generator_v2(
                 kwargs["input"],
                 kwargs["config"],
                 version="v2",
-                stream_mode=["updates", "messages", "custom"],
-                subgraphs=True,
             ):
                 await queue.put(("event", stream_event))
         except Exception as exc:
@@ -769,7 +790,9 @@ async def message_generator_v2(
                 },
             },
         )
-        yield emitter.emit("run.started", {"stream_tokens": bool(user_input.stream_tokens)})
+        yield emitter.emit(
+            "run.started", {"stream_tokens": bool(user_input.stream_tokens)}
+        )
 
         while True:
             try:
@@ -822,17 +845,9 @@ async def message_generator_v2(
                     if isinstance(state_patch.get("__interrupt__"), list):
                         interrupt: Interrupt
                         for interrupt in state_patch["__interrupt__"]:
-                            message_id = next_message_id("m_interrupt")
-                            final_message_id = message_id
-                            yield emitter.emit(
-                                "chat.message",
-                                {
-                                    "message_id": message_id,
-                                    "role": "assistant",
-                                    "kind": "system_notice",
-                                    "content": str(getattr(interrupt, "value", interrupt)),
-                                },
-                            )
+                            interrupt_event = emit_interrupt_event(interrupt, node_name)
+                            if interrupt_event:
+                                yield interrupt_event
                     for line in _events_from_state_like(state_patch, node_name):
                         yield line
                 continue
@@ -843,17 +858,9 @@ async def message_generator_v2(
                     if isinstance(state_output.get("__interrupt__"), list):
                         interrupt: Interrupt
                         for interrupt in state_output["__interrupt__"]:
-                            message_id = next_message_id("m_interrupt")
-                            final_message_id = message_id
-                            yield emitter.emit(
-                                "chat.message",
-                                {
-                                    "message_id": message_id,
-                                    "role": "assistant",
-                                    "kind": "system_notice",
-                                    "content": str(getattr(interrupt, "value", interrupt)),
-                                },
-                            )
+                            interrupt_event = emit_interrupt_event(interrupt, node_name)
+                            if interrupt_event:
+                                yield interrupt_event
                     for line in _events_from_state_like(state_output, node_name):
                         yield line
 
@@ -884,7 +891,9 @@ async def message_generator_v2(
                 continue
 
             if event_name == "on_tool_start":
-                tool_call_id = str(stream_event.get("run_id") or next_message_id("tool_call"))
+                tool_call_id = str(
+                    stream_event.get("run_id") or next_message_id("tool_call")
+                )
                 tool_started_at[tool_call_id] = monotonic()
                 tool_name = str(stream_event.get("name") or "tool")
                 yield emitter.emit(
@@ -894,7 +903,9 @@ async def message_generator_v2(
                 continue
 
             if event_name == "on_tool_end":
-                tool_call_id = str(stream_event.get("run_id") or next_message_id("tool_call"))
+                tool_call_id = str(
+                    stream_event.get("run_id") or next_message_id("tool_call")
+                )
                 started_at = tool_started_at.pop(tool_call_id, monotonic())
                 duration_ms = max(0, int((monotonic() - started_at) * 1000))
                 yield emitter.emit(
@@ -1035,7 +1046,7 @@ async def message_generator_v2(
                 "run.failed",
                 {
                     "code": "internal_error",
-                    "message": str(e) or "Internal server error",
+                    "message": sanitize_error_message(e),
                     "retryable": False,
                 },
             )
@@ -1123,10 +1134,10 @@ def _sse_v2_response_example() -> dict[int | str, Any]:
                     "example": (
                         "id: 8d1f:1\n"
                         "event: session.metadata\n"
-                        "data: {\"v\":\"2.0\",\"seq\":1,\"run_id\":\"8d1f\",\"thread_id\":\"a21c\"}\n\n"
+                        'data: {"v":"2.0","seq":1,"run_id":"8d1f","thread_id":"a21c"}\n\n'
                         "id: 8d1f:2\n"
                         "event: run.completed\n"
-                        "data: {\"v\":\"2.0\",\"seq\":2,\"run_id\":\"8d1f\",\"thread_id\":\"a21c\",\"duration_ms\":1200}\n\n"
+                        'data: {"v":"2.0","seq":2,"run_id":"8d1f","thread_id":"a21c","duration_ms":1200}\n\n'
                     ),
                     "schema": {"type": "string"},
                 }
