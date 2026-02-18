@@ -6,6 +6,7 @@
 
 from typing import Literal, List, Dict, Any, Optional
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 from langgraph.graph import END, StateGraph
 from agents.state import AgentState, FileProcessing
@@ -182,7 +183,9 @@ def file_convert(state: AgentState) -> AgentState:
         return state
 
     tmp_dir_base = Path(tool_outputs.get("tmp_dir", "/tmp/lang_preprocess"))
-    tmp_dir_name = Path(input_path_str.split("/")[-1]).stem
+    # URL이면 쿼리 파라미터 제거 및 URL 디코딩 (OSError 36: File name too long 방지)
+    _url_path = urlparse(input_path_str).path if _is_http_url(input_path_str) else input_path_str
+    tmp_dir_name = Path(unquote(_url_path.split("/")[-1])).stem
     tmp_dir = tmp_dir_base / tmp_dir_name
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
