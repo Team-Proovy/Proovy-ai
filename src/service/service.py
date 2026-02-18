@@ -8,6 +8,7 @@ FastAPI 서비스 엔트리포인트.
 """
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -613,9 +614,11 @@ async def message_generator_v2(
             node_name=node_name,
             custom_data=chat_message.custom_data,
         )
-        signature = (
-            f"{chat_message.type}|{kind}|{node_name or ''}|{chat_message.content}"
-        )
+        content_str = convert_message_content_to_string(chat_message.content)
+        content_hash = hashlib.md5(
+            content_str.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:16]
+        signature = f"{chat_message.type}|{kind}|{node_name or ''}|{content_hash}"
         if signature in emitted_chat_signatures:
             return events
         emitted_chat_signatures.add(signature)
@@ -636,7 +639,10 @@ async def message_generator_v2(
     def emit_interrupt_event(interrupt: Any, node_name: str | None) -> str | None:
         nonlocal final_message_id
         content = str(getattr(interrupt, "value", interrupt))
-        signature = f"interrupt|system_notice|{node_name or ''}|{content}"
+        content_hash = hashlib.md5(
+            content.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:16]
+        signature = f"interrupt|system_notice|{node_name or ''}|{content_hash}"
         if signature in emitted_chat_signatures:
             return None
         emitted_chat_signatures.add(signature)
