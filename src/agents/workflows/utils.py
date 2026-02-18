@@ -86,8 +86,10 @@ def get_conversation_history(
         if last_type is not None:
             if is_user and last_type in {"ai", "assistant"}:
                 turns_collected += 1
+                if turns_collected > max_turns:
+                    break
 
-        if turns_collected >= max_turns:
+        if turns_collected > max_turns:
             break
 
         # 메시지 텍스트 추출 및 truncate
@@ -107,15 +109,99 @@ def get_conversation_history(
         last_type = msg_type
 
     result.reverse()
+    # 턴 경계에서 잘린 orphan AIMessage는 API 입력 안정성을 위해 제거한다.
+    while result and getattr(result[0], "type", "") in {"ai", "assistant"}:
+        result = result[1:]
     return result
 
 
-def get_conversation_summary(state: AgentState, *, max_chars: int = 2000) -> str:
+_PREV_REF_KEYWORDS = (
+    "아까",
+    "방금",
+    "저번",
+    "전에 풀었던",
+    "전에 나온",
+    "그 문제",
+    "그문제",
+    "앞에서",
+    "위에서",
+    "아까 푼",
+    "전 문제",
+    "전문제",
+    "먼저 푼",
+    "처음 문제",
+    "이전 문제",
+    "이전 대화",
+    "이전에 풀었던",
+)
+
+
+def references_previous_conversation(text: str) -> bool:
+    """사용자 메시지가 이전 대화를 명시적으로 참조하는지 확인한다."""
+    return any(kw in text for kw in _PREV_REF_KEYWORDS)
+
+
+def get_conversation_summary(
+    state: AgentState,
+    *,
+    max_chars: int = 2000,
+    max_turns: int | None = None,
+) -> str:
     """대화 히스토리를 간략한 요약 문자열로 반환한다.
 
     시스템 프롬프트에 대화 맥락을 포함시킬 때 유용합니다.
+
+    Args:
+        state: 현재 AgentState
+        max_chars: 전체 요약의 최대 문자 수
+        max_turns: 포함할 최대 대화 턴 수 (None이면 제한 없음).
+                   현재 질문은 제외하고 이전 대화만 카운트합니다.
     """
     messages = state.get("messages") or []
+
+    # max_turns가 지정된 경우, 가장 최근 메시지부터 역순으로 수집 후 되돌림
+    if max_turns is not None:
+        selected: List[BaseMessage] = []
+        turns_collected = 0
+        last_type = None
+        skip_latest_user = False
+
+        # 마지막 대화 메시지가 사용자라면(=현재 질문), max_turns 요약에서 제외한다.
+        for message in reversed(messages):
+            msg_type = getattr(message, "type", "")
+            if msg_type in {"human", "user"}:
+                skip_latest_user = True
+                break
+            if msg_type in {"ai", "assistant"}:
+                break
+
+        for message in reversed(messages):
+            msg_type = getattr(message, "type", "")
+            if msg_type in {"system", "tool"}:
+                continue
+            if msg_type not in {"human", "user", "ai", "assistant"}:
+                continue
+            is_user = msg_type in {"human", "user"}
+
+            if is_user and skip_latest_user:
+                skip_latest_user = False
+                continue
+
+            if last_type is not None and is_user and last_type in {"ai", "assistant"}:
+                turns_collected += 1
+                if turns_collected > max_turns:
+                    break
+            if turns_collected > max_turns:
+                break
+
+            selected.append(message)
+            last_type = msg_type
+        messages = list(reversed(selected))
+
+    # 턴 경계에서 잘리면 AI로 시작할 수 있어, 선두 orphan AI를 제거한다.
+    while messages and getattr(messages[0], "type", "") in {"ai", "assistant"}:
+        messages = messages[1:]
+
     summary_parts: List[str] = []
     total_chars = 0
 
