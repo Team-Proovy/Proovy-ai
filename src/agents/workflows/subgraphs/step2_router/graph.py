@@ -14,6 +14,7 @@ import json
 from typing import Literal, List, Optional
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 
 from agents.prompts.router_prompts import (
@@ -34,11 +35,13 @@ from agents.workflows.problem_utils import (
     extract_problem_inventory,
     input_files_fingerprint,
 )
+from agents.workflows.retry_trace import env_truthy, retry_trace_log
 from agents.workflows.utils import extract_ocr_text
 from core.llm import get_model
 from schema.models import OpenRouterModelName
 
 MAX_RETRIES = 2
+FORCE_RETRY_EXECUTOR_TO_REVIEW_ENV = "FORCE_RETRY_EXECUTOR_TO_REVIEW"
 
 
 FEATURE_ACTIONS = {
@@ -436,6 +439,13 @@ def executor(state: AgentState) -> AgentState:
     print("---ROUTER: EXECUTING STEP---")
     plan = [step for step in (state.get("plan") or []) if step in FEATURE_ACTIONS]
 
+    if env_truthy(FORCE_RETRY_EXECUTOR_TO_REVIEW_ENV, default="false"):
+        # Retry flow 테스트 시 Feature 노드 대신 Review로 직접 라우팅한다.
+        state["current_step"] = "Review"
+        state["plan"] = plan
+        state["prev_action"] = "Executor"
+        return state
+
     if not plan:
         _, _, combined_question, _ = _collect_user_context(state)
         hints = _extract_chosen_features(state)
@@ -449,20 +459,41 @@ def executor(state: AgentState) -> AgentState:
     return state
 
 
-def retry_counter(state: AgentState) -> Literal["Executor", "__end__"]:
+def retry_counter(
+    state: AgentState, config: RunnableConfig | None = None
+) -> Literal["Executor", "__end__"]:
     """재시도 횟수를 확인하고, 다음 단계를 결정합니다.
     - 재시도 가능: Executor로 돌아가 다시 실행
     - 재시도 불가: Fallback 응답을 위해 그래프 종료
     """
     print("---ROUTER: RETRY COUNTER---")
-    retries = state.get("retry_count", 0) + 1
-    state["retry_count"] = retries
-    if retries > MAX_RETRIES:
+    before = int(state.get("retry_count", 0) or 0)
+    retry_trace_log(
+        event="before_retry_increment",
+        retry_count=before,
+        node="RetryCounter",
+        state=state,
+        config=config,
+        level="info",
+    )
+
+    if before >= MAX_RETRIES:
         state["retry_limit_exceeded"] = True
-        print(f"---ROUTER: RETRY LIMIT EXCEEDED ({retries - 1})---")
+        retry_trace_log(
+            event="retry_limit_reached",
+            retry_count=before,
+            node="RetryCounter",
+            state=state,
+            config=config,
+            level="warning",
+        )
+        print(f"---ROUTER: RETRY LIMIT EXCEEDED ({before}/{MAX_RETRIES})---")
         return "__end__"
+
+    retries = before + 1
+    state["retry_count"] = retries
     state.pop("retry_limit_exceeded", None)
-    print(f"---ROUTER: RETRYING ({retries - 1}/{MAX_RETRIES})---")
+    print(f"---ROUTER: RETRYING ({retries}/{MAX_RETRIES})---")
     return "Executor"
 
 
