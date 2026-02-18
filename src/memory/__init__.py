@@ -138,7 +138,12 @@ def _verify_checkpointer_tables(conn: Any) -> dict[str, bool]:
                     (table_name,),
                 )
                 row = cur.fetchone()
-                exists = row[0] if row else False
+                if row is None:
+                    exists = False
+                elif isinstance(row, dict):
+                    exists = bool(row.get("exists", False))
+                else:
+                    exists = bool(row[0])
                 results[table_name] = bool(exists)
     except Exception as e:
         logger.error(f"테이블 존재 여부 확인 실패: {type(e).__name__}: {e}")
