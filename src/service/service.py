@@ -97,6 +97,12 @@ PROGRESS_MESSAGES: dict[str, str] = {
     "Review": "전체 풀이 결과를 자동으로 리뷰하고 있습니다.",
     "Suggestion": "다음 학습 방향에 대한 제안을 준비하고 있습니다.",
 }
+CHAT_MESSAGE_EMITTING_NODES: dict[str, str] = {
+    "FinalResponse": "assistant_final",
+    "Simple_response": "assistant_partial",
+    "CreditInsufficient": "system_notice",
+    "Fallback": "system_notice",
+}
 STREAM_V2_HEARTBEAT_INTERVAL_SEC = 15.0
 
 
@@ -557,7 +563,11 @@ async def message_generator_v2(
     def sanitize_error_message(_: Exception) -> str:
         return "Internal server error"
 
-    def emit_chat_events(raw_message: Any, node_name: str | None) -> list[str]:
+    def emit_chat_events(
+        raw_message: Any,
+        node_name: str | None,
+        kind_override: str | None = None,
+    ) -> list[str]:
         nonlocal final_message_id
         events: list[str] = []
         try:
@@ -582,7 +592,7 @@ async def message_generator_v2(
             return events
 
         message_id = next_message_id("m_chat")
-        kind = chat_kind_from_message(
+        kind = kind_override or chat_kind_from_message(
             message_type=chat_message.type,
             node_name=node_name,
             custom_data=chat_message.custom_data,
@@ -646,7 +656,10 @@ async def message_generator_v2(
         name = stream_event.get("name")
         if isinstance(name, str):
             normalized = _normalize_node_name(name)
-            if normalized in PROGRESS_MESSAGES or normalized in {"FinalResponse"}:
+            if (
+                normalized in PROGRESS_MESSAGES
+                or normalized in CHAT_MESSAGE_EMITTING_NODES
+            ):
                 return normalized
         return None
 
@@ -753,11 +766,16 @@ async def message_generator_v2(
                         )
                     )
 
-        if node_name == "FinalResponse":
+        emit_kind = CHAT_MESSAGE_EMITTING_NODES.get(node_name or "")
+        if emit_kind:
             messages = state_like.get("messages")
             if isinstance(messages, list) and messages:
                 final_candidate = messages[-1]
-                for sse_line in emit_chat_events(final_candidate, node_name):
+                for sse_line in emit_chat_events(
+                    final_candidate,
+                    node_name,
+                    kind_override=emit_kind,
+                ):
                     lines.append(sse_line)
 
         return lines
