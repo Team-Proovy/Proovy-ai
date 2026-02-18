@@ -75,7 +75,7 @@ def explain(state: AgentState) -> AgentState:
         if explanation:
             from langchain_core.messages import AIMessage
 
-            ai_msg = AIMessage(content=explanation)
+            ai_msg = AIMessage(content=explanation + "\n\n")
             state["messages"] = (state.get("messages") or []) + [ai_msg]
     else:
         explain_result.explanation = (
