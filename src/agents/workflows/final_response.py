@@ -20,7 +20,7 @@ from agents.prompts.final_response_prompts import (
     TRADITIONAL_RESPONSE_USER_INSTRUCTION,
 )
 from agents.state import AgentState
-from agents.workflows.utils import call_model, get_conversation_summary
+from agents.workflows.utils import call_model, get_conversation_summary, references_previous_conversation
 from schema.models import OpenRouterModelName
 
 
@@ -161,8 +161,11 @@ def final_response(state: AgentState) -> AgentState:
         # review_state는 JSON이 아닌 자연스러운 한국어 메시지로 변환
         formatted_review = _format_review_message(review_state)
 
-        # 이전 대화 맥락 수집 (멀티턴 대화 지원)
-        conversation_context = get_conversation_summary(state, max_chars=1500)
+        # 사용자가 이전 대화를 명시적으로 참조하는 경우에만 히스토리 포함
+        if references_previous_conversation(user_text):
+            conversation_context = get_conversation_summary(state, max_chars=1500, max_turns=2)
+        else:
+            conversation_context = ""
 
         system_prompt = TRADITIONAL_RESPONSE_SYSTEM_PROMPT
 

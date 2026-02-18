@@ -200,7 +200,7 @@ def simple_response(state: AgentState) -> AgentState:
     checkpointer가 저장한 이전 대화 히스토리를 활용하여
     멀티턴 대화의 맥락을 유지합니다.
     """
-    from agents.workflows.utils import get_conversation_history, message_to_text
+    from agents.workflows.utils import get_conversation_history, message_to_text, references_previous_conversation
 
     print("---MAIN: SIMPLE RESPONSE---")
     messages = state.get("messages") or []
@@ -217,34 +217,34 @@ def simple_response(state: AgentState) -> AgentState:
     if not user_text:
         return state
 
-    # 이전 대화 히스토리를 LLM에 전달하기 위해 수집
-    # 최근 5턴의 대화를 포함하여 맥락 유지
-    conversation_history = get_conversation_history(
-        state,
-        max_turns=5,
-        max_chars_per_message=800,
-    )
+    # 사용자가 이전 대화를 명시적으로 참조하는 경우에만 히스토리 포함
+    uses_prev_ref = references_previous_conversation(user_text)
 
-    # 대화 맥락 요약 생성 (시스템 프롬프트에 포함)
     history_context = ""
-    if len(conversation_history) > 1:  # 이전 대화가 있는 경우
-        history_lines = []
-        for msg in conversation_history[:-1]:  # 마지막 메시지 제외 (현재 질문)
-            role = "사용자" if getattr(msg, "type", "") in {"human", "user"} else "AI"
-            content = message_to_text(msg)[:300]
-            history_lines.append(f"{role}: {content}")
-        if history_lines:
-            history_context = "\n\n[이전 대화 기록]\n" + "\n".join(history_lines)
+    conversation_history = []
+    if uses_prev_ref:
+        conversation_history = get_conversation_history(
+            state,
+            max_turns=3,
+            max_chars_per_message=800,
+        )
+        if len(conversation_history) > 1:
+            history_lines = []
+            for msg in conversation_history[:-1]:  # 마지막 메시지 제외 (현재 질문)
+                role = "사용자" if getattr(msg, "type", "") in {"human", "user"} else "AI"
+                content = message_to_text(msg)[:300]
+                history_lines.append(f"{role}: {content}")
+            if history_lines:
+                history_context = "\n\n[이전 대화 기록]\n" + "\n".join(history_lines)
 
     system_prompt = build_simple_response_system_prompt(history_context)
 
     model = get_model(OpenRouterModelName.GPT_5_MINI)
 
-    # 전체 대화 히스토리를 LLM에 전달
+    # 이전 대화 맥락이 있으면 메시지로 포함, 없으면 현재 질문만 전달
     prompt_messages = [SystemMessage(content=system_prompt)]
 
-    # 이전 대화 맥락이 있으면 메시지로 포함
-    if len(conversation_history) > 1:
+    if uses_prev_ref and len(conversation_history) > 1:
         prompt_messages.extend(conversation_history)
     else:
         prompt_messages.append(HumanMessage(content=user_text))
