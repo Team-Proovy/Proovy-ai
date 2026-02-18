@@ -66,6 +66,7 @@ data: <json>
 ## 이벤트/데이터 형식 표
 
 ### 세션/런
+
 | event | data 필드 | 설명 | 예시 payload |
 | --- | --- | --- | --- |
 | session.metadata | agent_id, capabilities | 연결 직후 1회 전송되는 세션 메타 | `{"agent_id":"tutor","capabilities":{"token_stream":true,"heartbeat":true,"terminal_event":true}}` |
@@ -73,29 +74,36 @@ data: <json>
 | run.completed | duration_ms, final_message_id? | 정상 종료(terminal) | `{"duration_ms":8234,"final_message_id":"m_chat_3"}` |
 | run.failed | code, message, retryable | 실패 종료(terminal) | `{"code":"internal_error","message":"Internal server error","retryable":false}` |
 
+
 ### 노드
+
 | event | data 필드 | 설명 | 예시 payload |
 | --- | --- | --- | --- |
 | node.started | node, node_path | 노드 시작(visible 노드만) | `{"node":"FinalResponse","node_path":"Main/FinalResponse"}` |
 | node.progress | node, message | 진행 메시지(1회) | `{"node":"Solve","message":"문제를 분석하고 필요한 정보를 정리하고 있습니다."}` |
 | node.completed | node, status, duration_ms | 노드 종료(현재 status=success) | `{"node":"FinalResponse","status":"success","duration_ms":1200}` |
 
+
 ### LLM
+
 | event | data 필드 | 설명 | 예시 payload |
 | --- | --- | --- | --- |
 | llm.message.started | message_id, node, role | LLM 메시지 시작 | `{"message_id":"m_llm_2","node":"FinalResponse","role":"assistant"}` |
 | llm.token.delta | message_id, node, delta, index | 토큰 델타 스트림 | `{"message_id":"m_llm_2","node":"FinalResponse","delta":"안","index":0}` |
 | llm.message.completed | message_id, finish_reason | LLM 메시지 종료(stop/switch/error) | `{"message_id":"m_llm_2","finish_reason":"stop"}` |
 
+
 ### 메시지/툴/부가
+
 | event | data 필드 | 설명 | 예시 payload |
 | --- | --- | --- | --- |
 | chat.message | message_id, role, kind, content, node? | 완결 메시지/커스텀/인터럽트 | `{"message_id":"m_chat_3","role":"assistant","kind":"assistant_final","content":"안녕하세요","node":"FinalResponse"}` |
 | tool.call.started | tool_call_id, tool_name | 툴 호출 시작 | `{"tool_call_id":"tool_call_1","tool_name":"calculator"}` |
 | tool.call.completed | tool_call_id, status, duration_ms | 툴 호출 종료(현재 status=success) | `{"tool_call_id":"tool_call_1","status":"success","duration_ms":230}` |
-| credit.updated | balance, total_cost, remaining | 크레딧 상태 변경 | `{"balance":100,"total_cost":1,"remaining":99}` |
+| credit.updated | balance, total_cost, remaining | 크레딧 상태 변경(remaining = balance - total_cost) | `{"balance":100,"total_cost":1,"remaining":99}` |
 | artifact.ready | artifact_id, name, mime, path, size | 결과물 준비 완료 | `{"artifact_id":"solution.pdf","name":"solution.pdf","mime":"application/pdf","path":"/tmp/solution.pdf","size":102400}` |
 | heartbeat | alive | 유휴 상태 heartbeat | `{"alive":true}` |
+
 
 ### 세션/런
 - `session.metadata`
@@ -186,7 +194,7 @@ terminal은 `run.completed` 또는 `run.failed` 중 정확히 1회입니다.
 - `tool_call_id`는 `stream_event.run_id`가 있으면 사용하고, 없으면 내부 생성 id를 사용합니다.
 - 현재 `tool.call.completed.status`는 `success`로 고정됩니다.
 - `artifact.ready`는 `final_output.solution.pdf_path`가 관측될 때 emit합니다.
-- `credit.updated`는 `credit_state(balance, total_cost, difficulty)` 변경 시 emit합니다.
+- `credit.updated`는 `credit_state(balance, total_cost, difficulty)` 변경 시 emit하며, payload에는 `difficulty`를 포함하지 않습니다.
 - `heartbeat`는 스트림이 일정 시간(기본 15초) 동안 유휴일 때 emit합니다.
 
 ## `chat.message.kind` 표준값
