@@ -104,6 +104,12 @@ CHAT_MESSAGE_EMITTING_NODES: dict[str, str] = {
     "CreditInsufficient": "system_notice",
     "Fallback": "system_notice",
 }
+# LLM 토큰 스트리밍 완료 후 줄바꿈(\n\n)을 추가로 emit해야 하는 노드 목록
+# (Writer 노드 등 feature 응답 완료 후 구분선 역할)
+STREAMING_TRAILING_NEWLINE_NODES: set[str] = {
+    "Solve_Writer",
+    "Explain",
+}
 VISIBLE_NODES: set[str] = set(PROGRESS_MESSAGES.keys()) | {
     "FinalResponse",
     "Simple_response",
@@ -379,6 +385,8 @@ async def message_generator(
 
     progress_messages = PROGRESS_MESSAGES
     emitted_progress_nodes: set[str] = set()
+    # 스트리밍 노드 완료 후 줄바꿈 emit 중복 방지
+    streaming_newline_emitted: set[str] = set()
 
     def emit_progress(node_name: str) -> str | None:
         if node_name in emitted_progress_nodes:
@@ -431,6 +439,18 @@ async def message_generator(
                     progress_line = emit_progress(node_name)
                     if progress_line is not None:
                         yield progress_line  # type: ignore[misc]
+
+                    # 스트리밍 노드 완료 후 줄바꿈 토큰 emit
+                    if (
+                        user_input.stream_tokens
+                        and node_name in STREAMING_TRAILING_NEWLINE_NODES
+                        and node_name not in streaming_newline_emitted
+                    ):
+                        streaming_newline_emitted.add(node_name)
+                        newline_payload = json.dumps(
+                            {"type": "token", "content": "\n\n"}, ensure_ascii=False
+                        )
+                        yield f"data: {newline_payload}\n\n"
 
                     feature_nodes = {
                         "Solve",
@@ -1061,6 +1081,18 @@ async def message_generator_v2(
                 if "skip_stream" in tag_list:
                     continue
                 if active_llm_message_id is not None:
+                    # Writer 노드 등 스트리밍 feature 응답 완료 후 줄바꿈 추가
+                    if active_llm_node in STREAMING_TRAILING_NEWLINE_NODES:
+                        yield emitter.emit(
+                            "llm.token.delta",
+                            {
+                                "message_id": active_llm_message_id,
+                                "node": active_llm_node,
+                                "delta": "\n\n",
+                                "index": active_llm_token_index,
+                            },
+                        )
+                        active_llm_token_index += 1
                     yield emitter.emit(
                         "llm.message.completed",
                         {
