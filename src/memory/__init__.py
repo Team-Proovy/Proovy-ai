@@ -131,15 +131,20 @@ def _verify_checkpointer_tables(conn: Any) -> dict[str, bool]:
                     """
                     SELECT EXISTS (
                         SELECT FROM information_schema.tables
-                        WHERE table_name = %s
+                        WHERE table_schema = 'public'
+                        AND table_name = %s
                     )
                     """,
                     (table_name,),
                 )
-                exists = cur.fetchone()[0]
-                results[table_name] = exists
+                row = cur.fetchone()
+                exists = row[0] if row else False
+                results[table_name] = bool(exists)
     except Exception as e:
-        logger.error(f"테이블 존재 여부 확인 실패: {e}")
+        logger.error(f"테이블 존재 여부 확인 실패: {type(e).__name__}: {e}")
+        import traceback
+
+        logger.error(f"상세 traceback: {traceback.format_exc()}")
         for table_name in tables_to_check:
             results[table_name] = False
     return results
@@ -191,6 +196,12 @@ async def initialize_database() -> AsyncIterator[Optional[Any]]:
                 try:
                     logger.info("[Checkpointer] 테이블 스키마 setup 시작...")
                     saver.setup()  # type: ignore[attr-defined]
+
+                    # setup() 후 명시적 커밋 (DDL 변경사항 확정)
+                    if hasattr(saver.conn, "commit"):
+                        saver.conn.commit()
+                        logger.info("[Checkpointer] 트랜잭션 커밋 완료")
+
                     logger.info(
                         "[Checkpointer] PostgreSQL checkpointer 스키마 setup 완료"
                     )
