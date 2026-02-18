@@ -103,6 +103,22 @@ CHAT_MESSAGE_EMITTING_NODES: dict[str, str] = {
     "CreditInsufficient": "system_notice",
     "Fallback": "system_notice",
 }
+VISIBLE_NODES: set[str] = set(PROGRESS_MESSAGES.keys()) | {
+    "FinalResponse",
+    "Simple_response",
+    "Fallback",
+    "CreditInsufficient",
+    "CreditCheck",
+    "Router",
+    "Preprocessing",
+    "RAG",
+    "Solve",
+    "Explain",
+    "CreateGraph",
+    "Variant",
+    "Solution",
+    "Check",
+}
 STREAM_V2_HEARTBEAT_INTERVAL_SEC = 15.0
 
 
@@ -842,6 +858,8 @@ async def message_generator_v2(
             node_path_str = _node_path_from_event(stream_event, node_name)
 
             if event_name == "on_chain_start" and node_name:
+                if node_name not in VISIBLE_NODES:
+                    continue
                 if node_name not in node_started_at:
                     node_started_at[node_name] = monotonic()
                     yield emitter.emit(
@@ -882,6 +900,8 @@ async def message_generator_v2(
                     for line in _events_from_state_like(state_output, node_name):
                         yield line
 
+                if node_name not in VISIBLE_NODES:
+                    continue
                 if node_name not in node_completed:
                     node_completed.add(node_name)
                     started_at = node_started_at.get(node_name, monotonic())
@@ -950,7 +970,7 @@ async def message_generator_v2(
                     or "unknown"
                 )
 
-                if token_node not in node_started_at:
+                if token_node in VISIBLE_NODES and token_node not in node_started_at:
                     node_started_at[token_node] = monotonic()
                     yield emitter.emit(
                         "node.started",
