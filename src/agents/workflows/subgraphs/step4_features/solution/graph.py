@@ -445,7 +445,12 @@ def solution(state: AgentState) -> AgentState:
             local_payload["pdf_path"] = _resolve_local_pdf_path(pdf_file_name)
             local_code = _build_pdf_code(local_payload)
             local_exc: Exception | None = None
-            for envs, _reuse_flag in attempts:
+            # 로컬 실행 시 수식 이미지 렌더링 비활성화 (matplotlib/svglib 의존성 없이 안정적 생성)
+            _local_base_envs = dict(sandbox_envs)
+            _local_base_envs["SOLUTION_USE_MATH_RENDER"] = "0"
+            _local_base_envs["SOLUTION_USE_SVG_RENDER"] = "0"
+            _local_base_envs["SOLUTION_RENDER_MATH_AS_PLAIN"] = "1"
+            for envs, _reuse_flag in [(_local_base_envs, False)]:
                 local_envs = _merge_local_font_env(
                     envs,
                     pdf_path=local_payload["pdf_path"],
@@ -512,6 +517,15 @@ def solution(state: AgentState) -> AgentState:
             pdf_error = RuntimeError("PDF generation failed.")
         _record_pdf_failure(
             solution_result, tool_outputs, pdf_error, stdout_lines, stderr_lines
+        )
+        # PDF 실패 시에도 해설 텍스트로 final_answer 설정 (FinalResponse LLM이 혼란스러운 답변 생성 방지)
+        text_lines = []
+        for i, (prob, expl) in enumerate(zip(display_problems, display_explanations), 1):
+            text_lines.append(f"**문제 {i}**\n{prob}\n\n**해설**\n{expl}")
+        solution_text = "\n\n---\n\n".join(text_lines)
+        final_output["final_answer"] = (
+            f"{solution_result.chunk_summary or '해설을 생성했습니다.'}\n\n"
+            f"{solution_text}"
         )
 
     progress.current_chunk = current_chunk_index + 1

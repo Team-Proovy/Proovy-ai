@@ -96,6 +96,16 @@ def final_response(state: AgentState) -> AgentState:
     review_state = state.get("review_state")
     partial_responses = state.get("partial_responses", [])
 
+    # Solution 등 Feature가 이미 final_answer를 생성한 경우 LLM 재호출 없이 바로 반환
+    existing_answer = final_output.get("final_answer") if isinstance(final_output, dict) else None
+    if existing_answer and isinstance(existing_answer, str) and existing_answer.strip():
+        print("final_answer already set, skipping LLM synthesis")
+        ai_msg = AIMessage(content=existing_answer.strip())
+        state["messages"] = (messages or []) + [ai_msg]
+        state["final_output"] = final_output
+        state["prev_action"] = "FinalResponse"
+        return state
+
     # === 하이브리드 방식: partial_responses 우선 사용 ===
     # 주의: UI가 /stream의 token 이벤트만 렌더링하는 경우를 위해,
     # partial_responses가 있어도 최종 문장은 반드시 LLM 호출로 생성한다.

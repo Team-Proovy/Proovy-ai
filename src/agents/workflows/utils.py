@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import contextvars
 from typing import Any, Dict, List
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -478,6 +479,65 @@ def get_model_name_for_state(state: AgentState) -> OpenRouterModelName:
     return get_model_for_difficulty(difficulty)
 
 
+# =============================================================================
+# ContextVar 토큰 누적기 (Token Accumulator)
+# =============================================================================
+# call_model() 호출마다 토큰 사용량을 ContextVar로 누적합니다.
+# 각 Feature 실행 후 credit_check_after_feature()에서 읽고 초기화합니다.
+# =============================================================================
+
+_token_accumulator: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "token_accumulator_total",
+    default=0,
+)
+
+
+def reset_token_accumulator() -> None:
+    """Feature 실행 전/후 토큰 누적기를 초기화합니다."""
+    _token_accumulator.set(0)
+
+
+def get_accumulated_tokens() -> int:
+    """현재까지 call_model()을 통해 누적된 총 토큰 수를 반환합니다."""
+    return _token_accumulator.get()
+
+
+def _accumulate_tokens_from_message(ai_message: Any) -> None:
+    """AIMessage에서 토큰 사용량을 추출하여 ContextVar 누적기에 더합니다."""
+    current_total = _token_accumulator.get()
+
+    # 1순위: usage_metadata (LangChain 표준)
+    usage = getattr(ai_message, "usage_metadata", None)
+    if isinstance(usage, dict) and usage:
+        total = (
+            usage.get("total_tokens", 0)
+            or (usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
+        )
+        _token_accumulator.set(current_total + total)
+        return
+
+    # 2순위: response_metadata.token_usage (OpenRouter/OpenAI 포맷)
+    response_meta = getattr(ai_message, "response_metadata", None) or {}
+    token_usage = (
+        response_meta.get("token_usage")
+        or response_meta.get("usage")
+        or {}
+    )
+    if isinstance(token_usage, dict) and token_usage:
+        total = (
+            token_usage.get("total_tokens", 0)
+            or (
+                token_usage.get("prompt_tokens", 0)
+                + token_usage.get("completion_tokens", 0)
+            )
+            or (
+                token_usage.get("input_tokens", 0)
+                + token_usage.get("output_tokens", 0)
+            )
+        )
+        _token_accumulator.set(current_total + total)
+
+
 def call_model(
     model_name: OpenRouterModelName,
     system_prompt: str,
@@ -490,6 +550,9 @@ def call_model(
     기본값으로 `tags=["skip_stream"]`를 설정해, 이 유틸을 사용하는 대부분의 노드에서는
     /stream 토큰 스트리밍 대상에서 제외되도록 한다. 토큰을 스트리밍해야 하는 노드는
     tags=[] 또는 원하는 태그 목록을 명시적으로 전달한다.
+
+    내부적으로 토큰 사용량을 ContextVar 누적기에 기록하여
+    credit_check_after_feature()에서 실제 비용 계산에 활용된다.
     """
     if tags is None:
         tags = ["skip_stream"]
@@ -503,6 +566,10 @@ def call_model(
             HumanMessage(content=user_prompt),
         ]
     )
+
+    # 토큰 사용량을 누적기에 기록
+    _accumulate_tokens_from_message(ai_message)
+
     content = getattr(ai_message, "content", "")
     if isinstance(content, str):
         return content

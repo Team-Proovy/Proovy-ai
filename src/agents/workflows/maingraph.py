@@ -23,6 +23,8 @@ from agents.workflows.utils import (
     check_credit_sufficient,
     get_difficulty_from_state,
     COST_PER_1K_TOKENS,
+    get_accumulated_tokens,
+    reset_token_accumulator,
 )
 from schema.models import OpenRouterModelName
 
@@ -292,8 +294,12 @@ def _calculate_feature_cost(feature_name: str, difficulty: str) -> float:
 
 def credit_check_after_feature(state: AgentState) -> AgentState:
     """
-    Feature 실행 완료 후 크레딧을 차감하고, 다음 실행을 위한 잔액을 확인합니다.
+    Feature 실행 완료 후 토큰 기반으로 크레딧을 차감하고, 다음 실행을 위한 잔액을 확인합니다.
     이 노드는 각 Feature 실행 후에 호출됩니다.
+
+    비용 계산 우선순위:
+    1. call_model()을 통해 누적된 실제 토큰 수 × COST_PER_1K_TOKENS[difficulty]
+    2. 토큰 추적 실패 시 기존 FEATURE_BASE_COST × DIFFICULTY_MULTIPLIER (fallback)
     """
     print("---MAIN: CREDIT CHECK AFTER FEATURE---")
 
@@ -310,7 +316,7 @@ def credit_check_after_feature(state: AgentState) -> AgentState:
     difficulty = get_difficulty_from_state(state)
     credit_state["difficulty"] = difficulty
 
-    # 실행된 Feature에 대한 비용 계산 및 기록
+    # feature 이름 정규화
     feature_name = prev_action
     if feature_name not in FEATURE_BASE_COST:
         prev_action_str = str(prev_action)
@@ -319,33 +325,60 @@ def credit_check_after_feature(state: AgentState) -> AgentState:
                 feature_name = name
                 break
 
-    if feature_name in FEATURE_BASE_COST:
+    # --- 토큰 기반 비용 계산 ---
+    accumulated_tokens = get_accumulated_tokens()
+    reset_token_accumulator()  # 다음 Feature를 위해 초기화
+
+    cost_per_1k = COST_PER_1K_TOKENS.get(difficulty, 1.0)
+    token_cost = round((accumulated_tokens / 1000) * cost_per_1k, 4)
+
+    if token_cost > 0:
+        cost = token_cost
+        print(
+            f"→ Token-based cost: {accumulated_tokens} tokens × {cost_per_1k}/1k "
+            f"= {cost} credits  [{feature_name}, difficulty={difficulty}]"
+        )
+    elif feature_name in FEATURE_BASE_COST:
+        # 토큰 데이터가 없을 때 고정 비용 fallback
         cost = _calculate_feature_cost(feature_name, difficulty)
+        print(
+            f"→ Fixed-cost fallback (no token data): {feature_name} "
+            f"cost={cost}  [difficulty={difficulty}]"
+        )
+    else:
+        cost = 0.0
+        print(f"→ No cost recorded for prev_action='{prev_action}'")
+
+    if cost > 0:
         credit_state["total_cost"] = credit_state.get("total_cost", 0) + cost
 
         # 노드별 비용 기록
         cost_per_node = credit_state.get("cost_per_node", {})
-        cost_per_node[feature_name] = cost_per_node.get(feature_name, 0) + cost
+        cost_per_node[feature_name] = round(
+            cost_per_node.get(feature_name, 0) + cost, 4
+        )
         credit_state["cost_per_node"] = cost_per_node
 
         balance = credit_state.get("balance", 0)
         total_cost = credit_state["total_cost"]
-        print(f"→ Credit used: {feature_name} cost={cost}, total={total_cost}/{balance}")
+        print(f"→ Credit total: {total_cost:.4f} / {balance}")
 
-    # 다음 Feature 실행을 위한 잔액 확인
+    # 다음 Feature 실행을 위한 잔액 사전 확인
     remaining_plan = state.get("plan") or []
     if remaining_plan:
         next_feature = remaining_plan[0] if remaining_plan else None
         if next_feature and next_feature in FEATURE_BASE_COST:
+            # 다음 비용은 최소 예상치(fixed fallback)로 확인
             next_cost = _calculate_feature_cost(next_feature, difficulty)
-
-            # 잔액 확인 (balance - total_cost)
             balance = credit_state.get("balance", 0)
             total_cost = credit_state.get("total_cost", 0)
             available = balance - total_cost
 
             if available < next_cost:
-                print(f"→ Insufficient credit for {next_feature} (need: {next_cost}, available: {available})")
+                print(
+                    f"→ Insufficient credit for next feature '{next_feature}' "
+                    f"(estimated need: {next_cost}, available: {available:.4f})"
+                )
                 credit_state["insufficient"] = True
                 credit_state["stopped_at_feature"] = next_feature
 
