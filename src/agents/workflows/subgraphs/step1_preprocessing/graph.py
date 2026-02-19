@@ -199,8 +199,9 @@ def file_convert(state: AgentState) -> AgentState:
         return state
     pdf_path = local_input
 
-    # PDF -> 페이지 이미지
-    image_paths: List[Path] = preprocessing_utils.pdf_to_images(pdf_path, tmp_dir)
+    # PDF -> 페이지 이미지 (이미지 출력 경로는 PDF와 별도 디렉토리 사용)
+    images_out_dir = tmp_dir / "images"
+    image_paths: List[Path] = preprocessing_utils.pdf_to_images(pdf_path, images_out_dir)
     converted_images = [str(p) for p in image_paths]
 
     state["file_processing"] = _model_copy(fp, {"converted_images": converted_images})
@@ -230,9 +231,7 @@ def vision_llm(state: AgentState) -> AgentState:
     for img_ref in images:
         local_img = _localize_input_path(img_ref, tmp_dir_base)
         try:
-            proc_img = preprocessing_utils.preprocess_image(
-                local_img, local_img.with_suffix(".proc.png")
-            )
+            proc_img = preprocessing_utils.preprocess_image(str(local_img))
             prepared_images.append(str(proc_img))
         except Exception:
             prepared_images.append(str(local_img))
