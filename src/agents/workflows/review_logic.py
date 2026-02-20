@@ -228,7 +228,8 @@ def run_review(state: Dict[str, Any]) -> Dict[str, Any]:
         print(
             f"---REVIEW: MODEL={MODEL_NAME} openrouter_key_set={bool(settings.OPENROUTER_API_KEY)}---"
         )
-        model = get_model(MODEL_NAME)
+        # Review 노드는 내부 JSON만 사용하므로 토큰 스트리밍을 비활성화한다.
+        model = get_model(MODEL_NAME).with_config(tags=["skip_stream"])
         prompt = [
             SystemMessage(content=REVIEW_SYSTEM_PROMPT),
             HumanMessage(

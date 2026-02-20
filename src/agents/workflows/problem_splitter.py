@@ -117,7 +117,7 @@ def split_problems(text: str, use_llm: bool = True) -> ProblemSplit:
     print("---SPLITTER: Using LLM for problem splitting---")
 
     try:
-        model = get_model(OpenRouterModelName.GPT_5_MINI)
+        model = get_model(OpenRouterModelName.GPT_5_MINI).with_config(tags=["skip_stream"])
 
         messages = [
             SystemMessage(content=SPLIT_SYSTEM_PROMPT),

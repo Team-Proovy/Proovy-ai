@@ -269,7 +269,12 @@ async def _handle_input(
     )
 
     input: Command | dict[str, Any]
-    input = {"messages": [HumanMessage(content=user_input.message)]}
+    input = {
+        "messages": [HumanMessage(content=user_input.message)],
+        # 이전 실행에서 체크포인터가 복원한 stale 값을 매 실행마다 초기화
+        "final_output": {},
+        "partial_responses": [],
+    }
 
     if user_input.files_url:
         files = list(user_input.files_url)
